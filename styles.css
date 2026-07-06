@@ -531,11 +531,10 @@ button {
 .analytics-settings-row {
   min-width: 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(260px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
   align-items: start;
-  overflow-x: auto;
-  padding-bottom: 2px;
+  overflow-x: hidden;
 }
 
 .panel {
@@ -566,20 +565,20 @@ button {
 }
 
 .compact-panel .panel-header {
-  padding: 10px 12px;
+  padding: 8px 10px;
 }
 
 .compact-panel .panel-header h3 {
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .compact-panel .panel-body {
-  padding: 12px;
+  padding: 10px;
 }
 
 .compact-panel .form-row {
-  grid-template-columns: minmax(110px, 1fr) auto auto;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
 }
 
 .compact-panel .field label {
@@ -591,11 +590,12 @@ button {
 .compact-panel .field select,
 .compact-panel .primary-button,
 .compact-panel .unit-label {
-  min-height: 34px;
+  min-height: 32px;
+  font-size: 12px;
 }
 
 .compact-panel .primary-button {
-  padding: 0 12px;
+  padding: 0 9px;
 }
 
 .form-row {
@@ -762,14 +762,16 @@ button {
 }
 
 .chart-wrap {
-  overflow-x: auto;
+  overflow: hidden;
+  width: 100%;
 }
 
 .chart {
   display: block;
-  min-width: 680px;
   width: 100%;
-  height: 360px;
+  height: auto;
+  aspect-ratio: 760 / 340;
+  max-height: 360px;
 }
 
 .chart-axis {
@@ -844,7 +846,7 @@ button {
   }
 
   .summary-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
@@ -926,6 +928,14 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .toolbar-actions:has(.sprint-settings-button) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 40px;
+    align-items: end;
+    gap: 8px;
+    padding-right: 0;
+  }
+
   .compact-panel .form-row {
     grid-template-columns: minmax(0, 1fr) auto auto;
   }
@@ -966,6 +976,46 @@ button {
     padding: 10px;
   }
 
+  .analytics-settings-row {
+    gap: 8px;
+  }
+
+  .compact-panel .panel-header {
+    padding: 7px 8px;
+  }
+
+  .compact-panel .panel-header h3 {
+    font-size: 12px;
+  }
+
+  .compact-panel .panel-body {
+    padding: 8px;
+  }
+
+  .compact-panel .form-row {
+    grid-template-columns: minmax(0, 1fr) 18px 38px;
+    gap: 4px;
+  }
+
+  .compact-panel .field label {
+    font-size: 10px;
+  }
+
+  .compact-panel .field input,
+  .compact-panel .primary-button,
+  .compact-panel .unit-label {
+    min-height: 30px;
+    font-size: 11px;
+  }
+
+  .compact-panel .field input {
+    padding: 0 6px;
+  }
+
+  .compact-panel .primary-button {
+    padding: 0 6px;
+  }
+
   .board {
     gap: 8px;
   }
@@ -983,6 +1033,37 @@ button {
   .summary-grid {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .summary-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .metric {
+    padding: 8px 6px;
+  }
+
+  .metric span {
+    font-size: 10px;
+  }
+
+  .metric strong {
+    margin-top: 6px;
+    font-size: 14px;
+  }
+
+  .chart {
+    max-height: 240px;
+  }
+
+  .legend {
+    gap: 8px;
+    font-size: 11px;
+  }
+
+  .toolbar-actions:has(.sprint-settings-button) {
+    grid-template-columns: minmax(0, 1fr) 40px;
   }
 
   .tabs {
@@ -1005,6 +1086,10 @@ button {
   .modal-close,
   .menu-button {
     width: 40px;
+  }
+
+  .toolbar-actions:has(.sprint-settings-button) .sprint-select-field {
+    width: 100%;
   }
 
   .panel-header,
@@ -1045,6 +1130,28 @@ button {
 
   .board {
     gap: 6px;
+  }
+
+  .analytics-settings-row {
+    gap: 6px;
+  }
+
+  .compact-panel .panel-header h3 {
+    font-size: 11px;
+  }
+
+  .compact-panel .panel-body {
+    padding: 6px;
+  }
+
+  .compact-panel .form-row {
+    grid-template-columns: minmax(0, 1fr) 16px 34px;
+    gap: 3px;
+  }
+
+  .compact-panel .unit-label,
+  .compact-panel .primary-button {
+    font-size: 10px;
   }
 
   .column-header h4 {
@@ -1089,6 +1196,14 @@ button {
   }
 
   .metric strong {
-    font-size: 20px;
+    font-size: 12px;
+  }
+
+  .chart {
+    max-height: 210px;
+  }
+
+  .legend {
+    font-size: 10px;
   }
 }
