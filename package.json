@@ -1,0 +1,28 @@
+{
+  "name": "agilelens",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "supabase": "supabase",
+    "supabase:login": "supabase login",
+    "supabase:link": "supabase link",
+    "supabase:push": "supabase db push"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rikuto-takeda/AgileLens.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/rikuto-takeda/AgileLens/issues"
+  },
+  "homepage": "https://github.com/rikuto-takeda/AgileLens#readme",
+  "devDependencies": {
+    "supabase": "^2.109.0"
+  }
+}

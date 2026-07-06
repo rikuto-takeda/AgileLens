@@ -39,71 +39,120 @@ MVP フェーズでは、Supabase（PostgreSQL）をバックエンドに採用�
 
 ## 2. テーブル設計 (Database Schema)
 
-バックエンドは Supabase（PostgreSQL）を使用します。EVM 計算に必要な「時給」「単価」や「稼働時間」のフィールドを追加しています。
+バックエンドは Supabase（PostgreSQL）を使用します。EVM 計算に必要な「時給」「単価」や「稼働時間」のフィールドに加えて、GitHub 同期、手動タスク、スプリント周期、検索性能、RLS を考慮した設計にします。
+
+正式な初期DDLは `supabase/migrations/20260706000000_initial_schema.sql` に配置します。以下は主要テーブルの設計方針です。
+
+### 2-1. 補強方針
+
+- UUID は `gen_random_uuid()` を使用する。
+- 全主要テーブルに `created_at` と `updated_at` を持たせる。
+- `updated_at` は trigger で自動更新する。
+- GitHub 同期対象のテーブルには `synced_at` を持たせる。
+- `issues` には GitHub ラベルキャッシュ用の `labels JSONB` を持たせる。
+- `issues` には `source` を持たせ、`github` / `manual` / `claude` を区別する。
+- `sprints` には `cycle_days` を持たせ、画面上のスプリント周期設定に対応する。
+- `kanban_column` は `Backlog` / `In Progress` / `Done` に制約する。
+- `state` は GitHub の `open` / `closed` に合わせる。
+- 検索頻度が高い `repository_id`、`sprint_id`、`kanban_column`、`recorded_date` には index を付与する。
+- MVP の RLS は「リポジトリ登録ユーザーが所有するデータにアクセス可能」を基本とする。
+- GitHub コラボレーター権限の厳密な確認は、DB の RLS だけではなくサーバー側で GitHub API に問い合わせて判定する。
+
+### 2-2. 主要テーブル
 
 ```sql
 -- 1. ユーザー管理 (Supabase Auth連携)
 CREATE TABLE public.users (
-    id UUID REFERENCES auth.users NOT NULL PRIMARY KEY,
-    github_id VARCHAR(255) UNIQUE NOT NULL,
-    username VARCHAR(255) NOT NULL,
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    github_id TEXT UNIQUE NOT NULL,
+    username TEXT NOT NULL,
     avatar_url TEXT,
     github_access_token TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
 -- 2. 連携リポジトリ (EVMの設定値である単価と時給を保持)
 CREATE TABLE public.repositories (
-    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
-    github_repo_id VARCHAR(255) UNIQUE NOT NULL,
-    repo_name VARCHAR(255) NOT NULL,
-    owner_name VARCHAR(255) NOT NULL,
-    hourly_wage INT DEFAULT 0,       -- ユーザーの時給（AC算出用）
-    point_unit_price INT DEFAULT 0,  -- 1 Story Pointあたりの単価（PV/EV算出用）
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    github_repo_id TEXT UNIQUE NOT NULL,
+    repo_name TEXT NOT NULL,
+    owner_name TEXT NOT NULL,
+    full_name TEXT GENERATED ALWAYS AS (owner_name || '/' || repo_name) STORED,
+    hourly_wage INT DEFAULT 0 NOT NULL,
+    point_unit_price INT DEFAULT 0 NOT NULL,
+    synced_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
 -- 3. スプリント情報 (GitHub Milestone同期)
 CREATE TABLE public.sprints (
-    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-    repository_id UUID REFERENCES public.repositories(id) ON DELETE CASCADE,
-    github_milestone_id VARCHAR(255) UNIQUE NOT NULL,
-    title VARCHAR(255) NOT NULL,
-    start_date TIMESTAMP WITH TIME ZONE,
-    due_on TIMESTAMP WITH TIME ZONE,
-    state VARCHAR(50) DEFAULT 'open',
-    total_story_points INT DEFAULT 0
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    repository_id UUID NOT NULL REFERENCES public.repositories(id) ON DELETE CASCADE,
+    github_milestone_id TEXT,
+    title TEXT NOT NULL,
+    start_date DATE,
+    due_on DATE,
+    cycle_days INT DEFAULT 14 NOT NULL,
+    state TEXT DEFAULT 'open' NOT NULL,
+    total_story_points INT DEFAULT 0 NOT NULL,
+    synced_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    UNIQUE (repository_id, github_milestone_id)
 );
 
 -- 4. タスク情報 (GitHub Issue同期)
 CREATE TABLE public.issues (
-    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-    repository_id UUID REFERENCES public.repositories(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    repository_id UUID NOT NULL REFERENCES public.repositories(id) ON DELETE CASCADE,
     sprint_id UUID REFERENCES public.sprints(id) ON DELETE SET NULL,
-    github_issue_id VARCHAR(255) UNIQUE NOT NULL,
-    github_issue_number INT NOT NULL,
-    title VARCHAR(255) NOT NULL,
-    state VARCHAR(50) DEFAULT 'open',
-    kanban_column VARCHAR(50) DEFAULT 'Backlog',
-    story_point INT DEFAULT 0,
+    github_issue_id TEXT,
+    github_issue_number INT,
+    title TEXT NOT NULL,
+    state TEXT DEFAULT 'open' NOT NULL,
+    kanban_column TEXT DEFAULT 'Backlog' NOT NULL,
+    story_point INT DEFAULT 0 NOT NULL,
+    labels JSONB DEFAULT '[]'::jsonb NOT NULL,
+    source TEXT DEFAULT 'github' NOT NULL,
+    assignee_username TEXT,
     assignee_avatar_url TEXT,
+    github_html_url TEXT,
     closed_at TIMESTAMP WITH TIME ZONE,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+    synced_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    UNIQUE (repository_id, github_issue_id),
+    UNIQUE (repository_id, github_issue_number)
 );
 
 -- 5. EVM時系列スナップショット (日々の稼働時間入力と連動して作成/更新)
 CREATE TABLE public.evm_daily_snapshots (
-    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-    sprint_id UUID REFERENCES public.sprints(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    sprint_id UUID NOT NULL REFERENCES public.sprints(id) ON DELETE CASCADE,
     recorded_date DATE NOT NULL,
-    planned_value INT DEFAULT 0, -- PV: その日までに予定していた累積価値(金額)
-    earned_value INT DEFAULT 0,  -- EV: その日までに完了した累積価値(金額)
-    actual_cost INT DEFAULT 0,   -- AC: その日までの累積コスト(金額)
-    daily_working_hours NUMERIC(5,2) DEFAULT 0, -- 画面から入力されたその日の稼働時間
+    planned_value INT DEFAULT 0 NOT NULL,
+    earned_value INT DEFAULT 0 NOT NULL,
+    actual_cost INT DEFAULT 0 NOT NULL,
+    daily_working_hours NUMERIC(5,2) DEFAULT 0 NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     UNIQUE (sprint_id, recorded_date)
 );
 ```
+
+### 2-3. Index / Constraint / RLS
+
+- `repositories(user_id)`、`repositories(full_name)` に index を付与する。
+- `sprints(repository_id)`、`sprints(repository_id, state)` に index を付与する。
+- `issues(repository_id)`、`issues(sprint_id)`、`issues(repository_id, sprint_id, kanban_column)` に index を付与する。
+- `issues.labels` は `GIN` index を付与する。
+- `evm_daily_snapshots(sprint_id, recorded_date)` に index と unique 制約を付与する。
+- 金額、Story Point、稼働時間は 0 以上に制約する。
+- RLS は全テーブルで有効化する。
+- `auth.uid()` と `repositories.user_id` を基準に所有データへのアクセスを許可する。
 
 ---
 
