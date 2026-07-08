@@ -13,7 +13,6 @@ const state = {
   draggedIssueId: null,
   selectedIssueId: null,
   sidebarOpen: false,
-  sprintDialogOpen: false,
   taskDialogOpen: false,
   pointDialogOpen: false,
   repoLoading: false,
@@ -26,6 +25,11 @@ const state = {
   availableGithubRepos: [],
   issuesLoading: false,
   issuesLoadError: null,
+  progressSyncing: false,
+  progressSyncError: null,
+  lastProgressSyncedAt: null,
+  taskSaveBusy: false,
+  issueSaveBusy: false,
   claudeTaskGenerating: false,
   claudeTaskError: null,
   repoForm: {
@@ -351,12 +355,7 @@ function renderSidebar() {
 }
 
 function renderBoard() {
-  const sprint = currentSprint();
-  const repoIssues = issues.filter(
-    (issue) =>
-      issue.repository_id === state.selectedRepoId &&
-      (!issue.sprint_id || issue.sprint_id === state.selectedSprintId),
-  );
+  const repoIssues = issues.filter((issue) => issue.repository_id === state.selectedRepoId);
   const columns = [
     { key: "Backlog", label: "未着手" },
     { key: "In Progress", label: "処理中" },
@@ -367,18 +366,21 @@ function renderBoard() {
     <div class="toolbar">
       <div>
         <h3>アジャイルボード</h3>
-        <p>${sprint.title} のGitHub Issueを3カラムで同期管理します。</p>
+        <p>GitHub Issueを3カラムで同期管理します。</p>
       </div>
       <div class="toolbar-actions">
-        ${renderSprintSelect("board-sprint")}
+        <button class="secondary-button" data-action="sync-progress" ${state.progressSyncing ? "disabled" : ""}>
+          ${state.progressSyncing ? "同期中" : "GitHub進捗同期"}
+        </button>
         <button class="secondary-button" data-action="generate-claude-tasks" ${state.claudeTaskGenerating ? "disabled" : ""}>
           ${state.claudeTaskGenerating ? "生成中" : "CLAUDE.mdから生成"}
         </button>
-        <button class="icon-button sprint-settings-button" data-action="open-sprint-dialog" aria-label="スプリント設定" title="スプリント設定">⚙</button>
       </div>
     </div>
     ${state.issuesLoadError ? `<p class="form-error board-message">${escapeHtml(state.issuesLoadError)}</p>` : ""}
+    ${state.progressSyncError ? `<p class="form-error board-message">${escapeHtml(state.progressSyncError)}</p>` : ""}
     ${state.claudeTaskError ? `<p class="form-error board-message">${escapeHtml(state.claudeTaskError)}</p>` : ""}
+    ${renderProgressSyncMeta()}
     <div class="board">
       ${columns
         .map((column) => {
@@ -410,49 +412,18 @@ function renderBoard() {
         })
         .join("")}
     </div>
-    ${state.sprintDialogOpen ? renderSprintDialog() : ""}
     ${state.taskDialogOpen ? renderTaskDialog() : ""}
     ${state.pointDialogOpen ? renderPointDialog() : ""}
   `;
 }
 
-function renderSprintDialog() {
-  const sprint = currentSprint();
+function renderProgressSyncMeta() {
+  if (!state.progressSyncing && !state.lastProgressSyncedAt) return "";
+
   return `
-    <div class="modal-backdrop" data-action="close-sprint-dialog">
-      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="sprint-dialog-title">
-        <div class="modal-header">
-          <h3 id="sprint-dialog-title">スプリント設定</h3>
-          <button class="icon-button modal-close" data-action="close-sprint-dialog" aria-label="閉じる">×</button>
-        </div>
-        <div class="modal-body">
-          <div class="sprint-form">
-            <div class="field">
-              <label for="sprint-start">開始日</label>
-              <input id="sprint-start" type="date" value="${sprint.start_date}" data-sprint-field="start_date" />
-            </div>
-            <div class="field">
-              <label for="sprint-cycle">周期</label>
-              <select id="sprint-cycle" data-sprint-field="cycle_days">
-                ${[7, 10, 14, 21, 28]
-                  .map(
-                    (days) =>
-                      `<option value="${days}" ${sprint.cycle_days === days ? "selected" : ""}>${days}日</option>`,
-                  )
-                  .join("")}
-              </select>
-            </div>
-            <div class="field">
-              <label for="sprint-due">終了日</label>
-              <input id="sprint-due" type="date" value="${sprint.due_on}" readonly />
-            </div>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button class="secondary-button" data-action="close-sprint-dialog">キャンセル</button>
-          <button class="primary-button" data-action="save-sprint-settings">保存</button>
-        </div>
-      </section>
+    <div class="board-sync-meta">
+      <span>${state.progressSyncing ? "GitHubのコミットとコードを確認しています" : "GitHub進捗同期済み"}</span>
+      ${state.lastProgressSyncedAt ? `<time>${formatDateTime(state.lastProgressSyncedAt)}</time>` : ""}
     </div>
   `;
 }
@@ -485,7 +456,9 @@ function renderTaskDialog() {
         </div>
         <div class="modal-footer">
           <button class="secondary-button" data-action="close-task-dialog">キャンセル</button>
-          <button class="primary-button" data-action="create-task">追加</button>
+          <button class="primary-button" data-action="create-task" ${state.taskSaveBusy ? "disabled" : ""}>
+            ${state.taskSaveBusy ? "追加中" : "追加"}
+          </button>
         </div>
       </section>
     </div>
@@ -524,45 +497,36 @@ function renderPointDialog() {
         </div>
         <div class="modal-footer">
           <button class="secondary-button" data-action="close-point-dialog">キャンセル</button>
-          <button class="primary-button" data-action="save-point">保存</button>
+          <button class="primary-button" data-action="save-point" ${state.issueSaveBusy ? "disabled" : ""}>
+            ${state.issueSaveBusy ? "保存中" : "保存"}
+          </button>
         </div>
       </section>
     </div>
   `;
 }
 
-function renderSprintSelect(id, options = {}) {
-  const selectedValue = options.analytics
-    ? state.selectedAnalyticsSprintId
-    : state.selectedSprintId;
-
-  return `
-    <div class="field sprint-select-field">
-      <label for="${id}">スプリント</label>
-      <select id="${id}" data-action="${options.analytics ? "select-analytics-sprint" : "select-sprint"}">
-        ${repoSprints()
-          .map(
-            (sprint) =>
-              `<option value="${sprint.id}" ${sprint.id === selectedValue ? "selected" : ""}>${formatSprintOption(sprint)}</option>`,
-          )
-          .join("")}
-        ${options.includeOverall ? `<option value="all" ${selectedValue === "all" ? "selected" : ""}>全体のEVM</option>` : ""}
-      </select>
-    </div>
-  `;
-}
-
-function formatSprintOption(sprint) {
-  return `${formatSprintLabel(sprint.title)}: ${formatShortDate(sprint.start_date)}~${formatShortDate(sprint.due_on)}`;
-}
-
-function formatSprintLabel(title) {
-  return title.split(":")[0].trim();
-}
-
 function formatShortDate(dateText) {
   const date = new Date(`${dateText}T00:00:00`);
   return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+function formatDateTime(dateText) {
+  const date = new Date(dateText);
+  if (Number.isNaN(date.getTime())) return "";
+
+  return new Intl.DateTimeFormat("ja-JP", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function calculateDueDate(startDate, cycleDays) {
+  const date = new Date(`${startDate}T00:00:00`);
+  date.setDate(date.getDate() + cycleDays - 1);
+  return date.toISOString().slice(0, 10);
 }
 
 function renderIssueCard(issue) {
@@ -602,11 +566,6 @@ function contextBadgeClass(context) {
 
 function renderAnalytics() {
   const repo = currentRepo();
-  const analyticsSprint =
-    state.selectedAnalyticsSprintId === "all"
-      ? null
-      : repoSprints().find((sprint) => sprint.id === state.selectedAnalyticsSprintId);
-  const analyticsScopeLabel = analyticsSprint ? formatSprintOption(analyticsSprint) : "全体のEVM";
   const latestEvm = evmData[evmData.length - 1];
   const sv = latestEvm.ev - latestEvm.pv;
   const cv = latestEvm.ev - latestEvm.ac;
@@ -618,9 +577,8 @@ function renderAnalytics() {
       <div class="toolbar">
         <div>
           <h3>EVMアナリティクス</h3>
-          <p>${analyticsScopeLabel} のPV/EV/ACを可視化します。</p>
+          <p>プロジェクト全体のPV/EV/ACを可視化します。</p>
         </div>
-        ${renderSprintSelect("analytics-sprint", { analytics: true, includeOverall: true })}
       </div>
       <div class="analytics-top">
         <div class="analytics-settings-row">
@@ -765,26 +723,12 @@ function bindDashboardEvents() {
       }
       state.issuesLoading = true;
       state.issuesLoadError = null;
+      state.progressSyncError = null;
       state.claudeTaskError = null;
       state.sidebarOpen = false;
       window.location.hash = `/projects/${state.selectedRepoId}/${state.view}`;
       render();
       await loadIssues(state.selectedRepoId);
-      render();
-    });
-  });
-
-  document.querySelectorAll("[data-action='select-sprint']").forEach((select) => {
-    select.addEventListener("change", () => {
-      state.selectedSprintId = select.value;
-      state.sprintDialogOpen = false;
-      render();
-    });
-  });
-
-  document.querySelectorAll("[data-action='select-analytics-sprint']").forEach((select) => {
-    select.addEventListener("change", () => {
-      state.selectedAnalyticsSprintId = select.value;
       render();
     });
   });
@@ -802,13 +746,30 @@ function bindDashboardEvents() {
 
   document.querySelectorAll(".column").forEach((column) => {
     column.addEventListener("dragover", (event) => event.preventDefault());
-    column.addEventListener("drop", () => {
+    column.addEventListener("drop", async () => {
       const issue = issues.find((item) => item.id === state.draggedIssueId);
       if (!issue) return;
-      issue.kanban_column = column.dataset.column;
-      showToast(`GitHubラベルを ${column.dataset.columnLabel} に同期しました`);
+      const previousColumn = issue.kanban_column;
+      const nextColumn = column.dataset.column;
+      if (previousColumn === nextColumn) {
+        state.draggedIssueId = null;
+        return;
+      }
+
+      issue.kanban_column = nextColumn;
       state.draggedIssueId = null;
       render();
+
+      try {
+        const data = await updateIssue(issue.id, { kanban_column: nextColumn });
+        mergeIssue(data.issue);
+        render();
+        showToast(`タスク位置を ${column.dataset.columnLabel} に保存しました`);
+      } catch (error) {
+        issue.kanban_column = previousColumn;
+        render();
+        showToast(error.message);
+      }
     });
   });
 
@@ -868,14 +829,6 @@ function bindDashboardEvents() {
     });
   });
 
-  const openSprintDialog = document.querySelector("[data-action='open-sprint-dialog']");
-  if (openSprintDialog) {
-    openSprintDialog.addEventListener("click", () => {
-      state.sprintDialogOpen = true;
-      render();
-    });
-  }
-
   const openTaskDialog = document.querySelector("[data-action='open-task-dialog']");
   if (openTaskDialog) {
     openTaskDialog.addEventListener("click", () => {
@@ -901,14 +854,6 @@ function bindDashboardEvents() {
     });
   });
 
-  document.querySelectorAll("[data-action='close-sprint-dialog']").forEach((element) => {
-    element.addEventListener("click", (event) => {
-      event.stopPropagation();
-      state.sprintDialogOpen = false;
-      render();
-    });
-  });
-
   const modal = document.querySelector(".modal");
   if (modal) {
     modal.addEventListener("click", (event) => {
@@ -930,44 +875,46 @@ function bindDashboardEvents() {
     });
   }
 
+  const syncProgressButton = document.querySelector("[data-action='sync-progress']");
+  if (syncProgressButton) {
+    syncProgressButton.addEventListener("click", async () => {
+      await syncProgress();
+    });
+  }
+
   const createTaskButton = document.querySelector("[data-action='create-task']");
   if (createTaskButton) {
-    createTaskButton.addEventListener("click", () => {
-      const title = document.querySelector("[data-task-field='title']").value.trim();
-      const assignee = document.querySelector("[data-task-field='assignee']").value.trim() || "NA";
-      const storyPoint = Number(document.querySelector("[data-task-field='story_point']").value);
-
-      if (!title) {
-        showToast("Issueタイトルを入力してください");
-        return;
-      }
-
-      issues.unshift({
-        id: `issue-${Date.now()}`,
-        repository_id: state.selectedRepoId,
-        sprint_id: state.selectedSprintId,
-        title,
-        assignee: assignee.slice(0, 3).toUpperCase(),
-        story_point: storyPoint,
-        kanban_column: "Backlog",
-      });
-      state.taskDialogOpen = false;
-      render();
-      showToast("タスクを未着手に追加しました");
+    createTaskButton.addEventListener("click", async () => {
+      await createManualTask();
     });
   }
 
   const savePointButton = document.querySelector("[data-action='save-point']");
   if (savePointButton) {
-    savePointButton.addEventListener("click", () => {
+    savePointButton.addEventListener("click", async () => {
       const issue = issues.find((item) => item.id === state.selectedIssueId);
       if (!issue) return;
 
-      issue.story_point = Number(document.querySelector("[data-point-field='story_point']").value);
-      state.pointDialogOpen = false;
-      state.selectedIssueId = null;
+      const storyPoint = Number(document.querySelector("[data-point-field='story_point']").value);
+      const previousPoint = issue.story_point;
+      issue.story_point = storyPoint;
+      state.issueSaveBusy = true;
       render();
-      showToast("Story Pointを更新しました");
+
+      try {
+        const data = await updateIssue(issue.id, { story_point: storyPoint });
+        mergeIssue(data.issue);
+        state.issueSaveBusy = false;
+        state.pointDialogOpen = false;
+        state.selectedIssueId = null;
+        render();
+        showToast("Story PointをDBに保存しました");
+      } catch (error) {
+        issue.story_point = previousPoint;
+        state.issueSaveBusy = false;
+        render();
+        showToast(error.message);
+      }
     });
   }
 
@@ -981,20 +928,6 @@ function bindDashboardEvents() {
     });
   }
 
-  const sprintStart = document.querySelector("[data-sprint-field='start_date']");
-  const sprintCycle = document.querySelector("[data-sprint-field='cycle_days']");
-  const sprintSettingsButton = document.querySelector("[data-action='save-sprint-settings']");
-  if (sprintStart && sprintCycle && sprintSettingsButton) {
-    sprintSettingsButton.addEventListener("click", () => {
-      const sprint = currentSprint();
-      sprint.start_date = sprintStart.value;
-      sprint.cycle_days = Number(sprintCycle.value);
-      sprint.due_on = calculateDueDate(sprint.start_date, sprint.cycle_days);
-      state.sprintDialogOpen = false;
-      render();
-      showToast("スプリント周期を保存し、終了日を再計算しました");
-    });
-  }
 }
 
 function showToast(message) {
@@ -1006,12 +939,6 @@ function showToast(message) {
   showToast.timer = window.setTimeout(() => {
     toast.classList.add("hidden");
   }, 2600);
-}
-
-function calculateDueDate(startDate, cycleDays) {
-  const date = new Date(`${startDate}T00:00:00`);
-  date.setDate(date.getDate() + cycleDays - 1);
-  return date.toISOString().slice(0, 10);
 }
 
 function escapeHtml(value) {
@@ -1071,14 +998,26 @@ async function loadIssues(repositoryId = state.selectedRepoId) {
 
   state.issuesLoading = true;
   state.issuesLoadError = null;
+  state.progressSyncError = null;
+  state.progressSyncing = true;
 
   try {
-    const data = await apiRequest(`/api/repositories/${encodeURIComponent(repositoryId)}/issues`);
+    let data = null;
+
+    try {
+      data = await syncRepositoryProgress(repositoryId);
+      state.lastProgressSyncedAt = data.synced_at || new Date().toISOString();
+    } catch (syncError) {
+      state.progressSyncError = syncError.message;
+      data = await apiRequest(`/api/repositories/${encodeURIComponent(repositoryId)}/issues`);
+    }
+
     issues = data.issues || [];
   } catch (error) {
     issues = [];
     state.issuesLoadError = error.message;
   } finally {
+    state.progressSyncing = false;
     state.issuesLoading = false;
   }
 }
@@ -1176,6 +1115,50 @@ async function createRepository() {
   }
 }
 
+async function createManualTask() {
+  if (!state.selectedRepoId) return;
+
+  const title = document.querySelector("[data-task-field='title']")?.value.trim() || "";
+  const assignee = document.querySelector("[data-task-field='assignee']")?.value.trim() || "NA";
+  const storyPoint = Number(document.querySelector("[data-task-field='story_point']")?.value || 1);
+
+  if (!title) {
+    showToast("Issueタイトルを入力してください");
+    return;
+  }
+
+  state.taskSaveBusy = true;
+  render();
+
+  try {
+    const data = await apiRequest(
+      `/api/repositories/${encodeURIComponent(state.selectedRepoId)}/issues`,
+      {
+        method: "POST",
+        body: {
+          title,
+          description: title,
+          assignee_username: assignee.slice(0, 32),
+          story_point: storyPoint,
+          kanban_column: "Backlog",
+        },
+      },
+    );
+
+    if (data.issue) {
+      issues.unshift(data.issue);
+    }
+    state.taskSaveBusy = false;
+    state.taskDialogOpen = false;
+    render();
+    showToast("タスクをDBに保存しました");
+  } catch (error) {
+    state.taskSaveBusy = false;
+    render();
+    showToast(error.message);
+  }
+}
+
 async function generateClaudeTasks() {
   if (!state.selectedRepoId) return;
 
@@ -1204,6 +1187,69 @@ async function generateClaudeTasks() {
     state.claudeTaskError = error.message;
     render();
   }
+}
+
+async function syncProgress() {
+  if (!state.selectedRepoId) return;
+
+  state.progressSyncing = true;
+  state.progressSyncError = null;
+  render();
+
+  try {
+    const data = await syncRepositoryProgress(state.selectedRepoId);
+    issues = data.issues || [];
+    state.lastProgressSyncedAt = data.synced_at || new Date().toISOString();
+    state.progressSyncing = false;
+    render();
+
+    if (data.updated_count > 0) {
+      showToast(`${data.updated_count}件の進捗をGitHubから同期しました`);
+    } else if (data.matched_count > 0) {
+      showToast("GitHubの進捗はすでに反映済みです");
+    } else {
+      showToast("一致するGitHubコミットはまだありません");
+    }
+  } catch (error) {
+    state.progressSyncing = false;
+    state.progressSyncError = error.message;
+    render();
+  }
+}
+
+async function syncRepositoryProgress(repositoryId) {
+  return apiRequest(`/api/repositories/${encodeURIComponent(repositoryId)}/sync-progress`, {
+    method: "POST",
+  });
+}
+
+async function updateIssue(issueId, body) {
+  return apiRequest(
+    `/api/repositories/${encodeURIComponent(state.selectedRepoId)}/issues/${encodeURIComponent(issueId)}`,
+    {
+      method: "PATCH",
+      body,
+    },
+  );
+}
+
+function mergeIssue(updatedIssue) {
+  if (!updatedIssue) return;
+
+  const index = issues.findIndex((issue) => issue.id === updatedIssue.id);
+  if (index === -1) {
+    issues.unshift(updatedIssue);
+    return;
+  }
+
+  const existingIssue = issues[index];
+  issues[index] = {
+    ...existingIssue,
+    ...updatedIssue,
+    title: updatedIssue.title || existingIssue.title,
+    description: updatedIssue.description || existingIssue.description,
+    task_context: updatedIssue.task_context || existingIssue.task_context,
+  };
 }
 
 function upsertRepository(repository) {

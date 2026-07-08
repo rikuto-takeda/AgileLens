@@ -35,6 +35,8 @@ const mimeTypes = {
 };
 
 let issueDescriptionColumnAvailable = true;
+const progressSignalCache = new Map();
+const progressSignalCacheMs = 60 * 1000;
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -70,12 +72,35 @@ const server = http.createServer(async (req, res) => {
       await handleListIssues(req, res, decodeURIComponent(issuesMatch[1]));
       return;
     }
+    if (req.method === "POST" && issuesMatch) {
+      await handleCreateIssue(req, res, decodeURIComponent(issuesMatch[1]));
+      return;
+    }
+
+    const issueMatch = url.pathname.match(/^\/api\/repositories\/([^/]+)\/issues\/([^/]+)$/);
+    if (req.method === "PATCH" && issueMatch) {
+      await handleUpdateIssue(
+        req,
+        res,
+        decodeURIComponent(issueMatch[1]),
+        decodeURIComponent(issueMatch[2]),
+      );
+      return;
+    }
 
     const generateTasksMatch = url.pathname.match(
       /^\/api\/repositories\/([^/]+)\/generate-claude-tasks$/,
     );
     if (req.method === "POST" && generateTasksMatch) {
       await handleGenerateClaudeTasks(req, res, decodeURIComponent(generateTasksMatch[1]));
+      return;
+    }
+
+    const syncProgressMatch = url.pathname.match(
+      /^\/api\/repositories\/([^/]+)\/sync-progress$/,
+    );
+    if (req.method === "POST" && syncProgressMatch) {
+      await handleSyncIssueProgress(req, res, decodeURIComponent(syncProgressMatch[1]));
       return;
     }
 
@@ -230,6 +255,32 @@ async function handleListIssues(req, res, repositoryId) {
   }
 }
 
+async function handleCreateIssue(req, res, repositoryId) {
+  try {
+    const { accessToken } = await getAuthenticatedContext(req, res);
+    await getRepositoryById(accessToken, repositoryId);
+    const input = normalizeManualIssueInput(await readJsonBody(req));
+    const issue = await createManualIssue(accessToken, repositoryId, input);
+
+    sendJson(res, 201, { issue });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleUpdateIssue(req, res, repositoryId, issueId) {
+  try {
+    const { accessToken } = await getAuthenticatedContext(req, res);
+    await getRepositoryById(accessToken, repositoryId);
+    const input = normalizeIssueUpdateInput(await readJsonBody(req));
+    const issue = await updateIssue(accessToken, repositoryId, issueId, input);
+
+    sendJson(res, 200, { issue });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
 async function handleGenerateClaudeTasks(req, res, repositoryId) {
   try {
     const { accessToken, user } = await getAuthenticatedContext(req, res);
@@ -259,6 +310,32 @@ async function handleGenerateClaudeTasks(req, res, repositoryId) {
       skipped_count: tasks.length - newTasks.length,
       source_path: "CLAUDE.md",
       issues: applyClaudeTaskDisplayTitles(issues, tasks),
+    });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleSyncIssueProgress(req, res, repositoryId) {
+  try {
+    const { accessToken, user } = await getAuthenticatedContext(req, res);
+    const repository = await getRepositoryById(accessToken, repositoryId);
+    const profile = await getPrivateUserProfile(accessToken, user);
+    const currentIssues = await listIssues(accessToken, repositoryId);
+    const syncResult = await syncIssuesProgressFromGithub(
+      accessToken,
+      repository,
+      currentIssues,
+      profile?.github_access_token,
+    );
+    const issues = await listIssues(accessToken, repositoryId);
+    const claudeTasks = await getClaudeTasksForDisplay(repository, profile?.github_access_token);
+
+    sendJson(res, 200, {
+      updated_count: syncResult.updatedCount,
+      matched_count: syncResult.matchedCount,
+      synced_at: syncResult.syncedAt,
+      issues: applyClaudeTaskDisplayTitles(issues, claudeTasks),
     });
   } catch (error) {
     handleApiError(req, res, error);
@@ -549,11 +626,824 @@ async function insertIssueRows(accessToken, repositoryId, tasks) {
   );
 }
 
+async function createManualIssue(accessToken, repositoryId, input) {
+  try {
+    const rows = await insertManualIssueRow(accessToken, repositoryId, input);
+    return Array.isArray(rows) ? normalizeIssueRow(rows[0]) : normalizeIssueRow(rows);
+  } catch (error) {
+    if (!issueDescriptionColumnAvailable || !isMissingIssueDescriptionColumn(error)) {
+      throw error;
+    }
+
+    issueDescriptionColumnAvailable = false;
+    const rows = await insertManualIssueRow(accessToken, repositoryId, input);
+    return Array.isArray(rows) ? normalizeIssueRow(rows[0]) : normalizeIssueRow(rows);
+  }
+}
+
+async function insertManualIssueRow(accessToken, repositoryId, input) {
+  const issue = {
+    repository_id: repositoryId,
+    title: input.title,
+    state: "open",
+    kanban_column: input.kanbanColumn,
+    story_point: input.storyPoint,
+    labels: [{ name: "manual-task" }],
+    source: "manual",
+    assignee_username: input.assigneeUsername,
+  };
+
+  if (issueDescriptionColumnAvailable) {
+    issue.description = input.description;
+  }
+
+  return supabaseFetch(`/rest/v1/issues?select=${issueSelectColumns()}`, {
+    method: "POST",
+    accessToken,
+    headers: {
+      Prefer: "return=representation",
+    },
+    body: issue,
+  });
+}
+
+async function updateIssue(accessToken, repositoryId, issueId, input) {
+  try {
+    const rows = await updateIssueRow(accessToken, repositoryId, issueId, input);
+    const issue = Array.isArray(rows) ? rows[0] : rows;
+    if (!issue) {
+      throw apiError(404, "issue_not_found", "タスクが見つかりません。");
+    }
+    return normalizeIssueRow(issue);
+  } catch (error) {
+    if (!issueDescriptionColumnAvailable || !isMissingIssueDescriptionColumn(error)) {
+      throw error;
+    }
+
+    issueDescriptionColumnAvailable = false;
+    const rows = await updateIssueRow(accessToken, repositoryId, issueId, input);
+    const issue = Array.isArray(rows) ? rows[0] : rows;
+    if (!issue) {
+      throw apiError(404, "issue_not_found", "タスクが見つかりません。");
+    }
+    return normalizeIssueRow(issue);
+  }
+}
+
+async function updateIssueRow(accessToken, repositoryId, issueId, input) {
+  const payload = {};
+
+  if (input.kanbanColumn !== undefined) {
+    payload.kanban_column = input.kanbanColumn;
+    payload.state = input.kanbanColumn === "Done" ? "closed" : "open";
+    payload.closed_at = input.kanbanColumn === "Done" ? new Date().toISOString() : null;
+  }
+
+  if (input.storyPoint !== undefined) {
+    payload.story_point = input.storyPoint;
+  }
+
+  return supabaseFetch(
+    `/rest/v1/issues?id=eq.${encodeURIComponent(issueId)}&repository_id=eq.${encodeURIComponent(
+      repositoryId,
+    )}&select=${issueSelectColumns()}`,
+    {
+      method: "PATCH",
+      accessToken,
+      headers: {
+        Prefer: "return=representation",
+      },
+      body: payload,
+    },
+  );
+}
+
+async function syncIssuesProgressFromGithub(accessToken, repository, issues, githubAccessToken) {
+  if (!githubAccessToken) {
+    throw apiError(
+      401,
+      "github_token_missing",
+      "GitHubの進捗同期ができません。もう一度ログインしてください。",
+    );
+  }
+
+  const syncedAt = new Date().toISOString();
+  const signals = await fetchGithubProgressSignals(repository, githubAccessToken, syncedAt);
+  const { updates, matchedCount } = buildIssueProgressUpdates(issues, signals);
+
+  if (updates.length > 0) {
+    await updateIssueProgressRows(accessToken, updates);
+  }
+
+  await updateRepositorySyncedAt(accessToken, repository.id, syncedAt);
+
+  return {
+    updatedCount: updates.length,
+    matchedCount,
+    syncedAt,
+  };
+}
+
+async function fetchGithubProgressSignals(repository, githubAccessToken, syncedAt) {
+  const cacheKey = `${repository.owner_name}/${repository.repo_name}`;
+  const cached = progressSignalCache.get(cacheKey);
+  if (cached && Date.now() - cached.createdAt < progressSignalCacheMs) {
+    return {
+      syncedAt,
+      ...cached.signals,
+      closedIssueNumbers: new Set(cached.signals.closedIssues.map((issue) => Number(issue.number))),
+    };
+  }
+
+  const githubRepository = await fetchGithubRepository(
+    repository.owner_name,
+    repository.repo_name,
+    githubAccessToken,
+  );
+  const defaultBranch = githubRepository.default_branch || "main";
+  const commitsBySha = new Map();
+  const closedIssues = await fetchClosedGithubIssues(repository, githubAccessToken).catch(() => []);
+  const branches = await fetchGithubBranches(repository, githubAccessToken).catch(() => [
+    { name: defaultBranch },
+  ]);
+  const defaultCommits = await fetchGithubCommits(
+    repository,
+    defaultBranch,
+    60,
+    githubAccessToken,
+  );
+
+  defaultCommits.forEach((commit) => addProgressCommit(commitsBySha, commit, defaultBranch, true));
+
+  const branchNames = branches
+    .map((branch) => branch.name)
+    .filter((branchName) => branchName && branchName !== defaultBranch)
+    .slice(0, 8);
+
+  for (const branchName of branchNames) {
+    const branchCommits = await fetchGithubCommits(
+      repository,
+      branchName,
+      12,
+      githubAccessToken,
+    ).catch(() => []);
+    branchCommits.forEach((commit) => addProgressCommit(commitsBySha, commit, branchName, false));
+  }
+
+  await hydrateProgressCommitCode(repository, commitsBySha, githubAccessToken);
+
+  const commits = Array.from(commitsBySha.values())
+    .map((commit) => ({
+      ...commit,
+      branches: Array.from(commit.branches),
+    }))
+    .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+
+  const signals = {
+    syncedAt,
+    defaultBranch,
+    commits,
+    closedIssues,
+    closedIssueNumbers: new Set(closedIssues.map((issue) => Number(issue.number))),
+  };
+
+  progressSignalCache.set(cacheKey, {
+    createdAt: Date.now(),
+    signals: {
+      defaultBranch,
+      commits,
+      closedIssues,
+    },
+  });
+
+  return signals;
+}
+
+function addProgressCommit(commitsBySha, commit, branchName, onDefault) {
+  if (!commit?.sha) return;
+
+  const existing = commitsBySha.get(commit.sha);
+  if (existing) {
+    existing.onDefault = existing.onDefault || onDefault;
+    existing.branches.add(branchName);
+    return;
+  }
+
+  const message = commit.commit?.message || "";
+  commitsBySha.set(commit.sha, {
+    sha: commit.sha,
+    message,
+    searchText: normalizeSearchText(message),
+    date: commit.commit?.committer?.date || commit.commit?.author?.date || "",
+    htmlUrl: commit.html_url || "",
+    codeSearchText: "",
+    files: [],
+    onDefault,
+    branches: new Set([branchName]),
+  });
+}
+
+async function hydrateProgressCommitCode(repository, commitsBySha, githubAccessToken) {
+  const commits = Array.from(commitsBySha.values())
+    .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
+    .slice(0, 35);
+
+  for (const commit of commits) {
+    const detail = await fetchGithubCommitDetail(repository, commit.sha, githubAccessToken).catch(
+      () => null,
+    );
+    if (!detail) continue;
+
+    const files = Array.isArray(detail.files) ? detail.files : [];
+    const codeFiles = files.filter((file) => isProgressCodePath(file.filename)).slice(0, 18);
+    commit.files = codeFiles.map((file) => file.filename);
+    commit.codeSearchText = normalizeSearchText(
+      codeFiles
+        .map((file) =>
+          [
+            file.filename,
+            file.previous_filename,
+            file.status,
+            String(file.patch || "").slice(0, 24000),
+          ]
+            .filter(Boolean)
+            .join(" "),
+        )
+        .join("\n"),
+    );
+  }
+}
+
+async function fetchGithubCommitDetail(repository, sha, githubAccessToken) {
+  return githubFetch(
+    githubRepoEndpoint(repository, `commits/${encodeURIComponent(sha)}`),
+    githubAccessToken,
+  );
+}
+
+function isProgressCodePath(filePath) {
+  const normalizedPath = String(filePath || "").replace(/\\/g, "/");
+  const lowerPath = normalizedPath.toLowerCase();
+
+  if (
+    !normalizedPath ||
+    lowerPath.includes("/node_modules/") ||
+    lowerPath.includes("/dist/") ||
+    lowerPath.includes("/build/") ||
+    lowerPath.includes("/coverage/") ||
+    lowerPath.includes("/.next/") ||
+    lowerPath.includes("/.git/") ||
+    lowerPath.endsWith("package-lock.json") ||
+    lowerPath.endsWith("pnpm-lock.yaml") ||
+    lowerPath.endsWith("yarn.lock") ||
+    lowerPath.endsWith(".env") ||
+    lowerPath.endsWith(".env.local") ||
+    lowerPath.endsWith("claude.md") ||
+    lowerPath.endsWith("readme.md")
+  ) {
+    return false;
+  }
+
+  return /\.(?:js|jsx|ts|tsx|mjs|cjs|html|css|scss|sql|json|yml|yaml|vue|svelte|py|go|rb|php|java|kt|swift|rs|cs)$/.test(
+    lowerPath,
+  );
+}
+
+async function fetchGithubBranches(repository, githubAccessToken) {
+  const url = new URL(githubRepoEndpoint(repository, "branches"));
+  url.searchParams.set("per_page", "100");
+
+  const branches = await githubFetch(url, githubAccessToken);
+  if (!Array.isArray(branches)) {
+    throw apiError(502, "github_request_failed", "GitHubブランチ一覧の取得に失敗しました。");
+  }
+
+  return branches;
+}
+
+async function fetchGithubCommits(repository, branchName, perPage, githubAccessToken) {
+  const url = new URL(githubRepoEndpoint(repository, "commits"));
+  url.searchParams.set("sha", branchName);
+  url.searchParams.set("per_page", String(perPage));
+
+  const commits = await githubFetch(url, githubAccessToken);
+  if (!Array.isArray(commits)) {
+    throw apiError(502, "github_request_failed", "GitHubコミット一覧の取得に失敗しました。");
+  }
+
+  return commits;
+}
+
+async function fetchClosedGithubIssues(repository, githubAccessToken) {
+  const url = new URL(githubRepoEndpoint(repository, "issues"));
+  url.searchParams.set("state", "closed");
+  url.searchParams.set("sort", "updated");
+  url.searchParams.set("direction", "desc");
+  url.searchParams.set("per_page", "100");
+
+  const issues = await githubFetch(url, githubAccessToken);
+  if (!Array.isArray(issues)) return [];
+
+  return issues
+    .filter((issue) => !issue.pull_request)
+    .map((issue) => ({
+      number: issue.number,
+      title: issue.title || "",
+      body: issue.body || "",
+      closedAt: issue.closed_at || "",
+      searchText: normalizeSearchText(`${issue.title || ""} ${issue.body || ""}`),
+    }));
+}
+
+function githubRepoEndpoint(repository, resourcePath) {
+  return `https://api.github.com/repos/${encodeURIComponent(
+    repository.owner_name,
+  )}/${encodeURIComponent(repository.repo_name)}/${resourcePath}`;
+}
+
+function buildIssueProgressUpdates(issues, signals) {
+  const updates = [];
+  let matchedCount = 0;
+
+  issues.forEach((issue) => {
+    const decision = decideIssueProgress(issue, signals);
+    if (!decision) return;
+
+    matchedCount += 1;
+    if (issue.kanban_column === "Done" && decision.kanbanColumn !== "Done") return;
+
+    const nextState = decision.kanbanColumn === "Done" ? "closed" : "open";
+    if (issue.kanban_column === decision.kanbanColumn && issue.state === nextState) return;
+
+    updates.push({
+      id: issue.id,
+      kanban_column: decision.kanbanColumn,
+      state: nextState,
+      closed_at: decision.kanbanColumn === "Done" ? decision.closedAt || signals.syncedAt : undefined,
+      synced_at: signals.syncedAt,
+    });
+  });
+
+  return { updates, matchedCount };
+}
+
+function decideIssueProgress(issue, signals) {
+  if (
+    issue.github_issue_number &&
+    signals.closedIssueNumbers.has(Number(issue.github_issue_number))
+  ) {
+    const closedIssue = signals.closedIssues.find(
+      (item) => Number(item.number) === Number(issue.github_issue_number),
+    );
+    return {
+      kanbanColumn: "Done",
+      closedAt: closedIssue?.closedAt || signals.syncedAt,
+    };
+  }
+
+  const matcher = createIssueProgressMatcher(issue);
+  const matchedClosedIssue = signals.closedIssues.find((closedIssue) =>
+    matcher.matches(closedIssue.searchText),
+  );
+
+  if (matchedClosedIssue) {
+    return {
+      kanbanColumn: "Done",
+      closedAt: matchedClosedIssue.closedAt || signals.syncedAt,
+    };
+  }
+
+  const messageMatchedCommits = signals.commits.filter((commit) => matcher.matches(commit.searchText));
+  const codeMatchedCommits = signals.commits.filter((commit) =>
+    matcher.matchesCode(commit.codeSearchText),
+  );
+  const matchedCommits = uniqueProgressCommits([...messageMatchedCommits, ...codeMatchedCommits]);
+  const defaultMatchedCommit = matchedCommits.find((commit) => commit.onDefault);
+
+  if (defaultMatchedCommit) {
+    return {
+      kanbanColumn: "Done",
+      closedAt: defaultMatchedCommit.date || signals.syncedAt,
+    };
+  }
+
+  if (matchedCommits.length > 0) {
+    return {
+      kanbanColumn: "In Progress",
+    };
+  }
+
+  return null;
+}
+
+function uniqueProgressCommits(commits) {
+  const seen = new Set();
+  return commits.filter((commit) => {
+    if (!commit?.sha || seen.has(commit.sha)) return false;
+    seen.add(commit.sha);
+    return true;
+  });
+}
+
+function createIssueProgressMatcher(issue) {
+  const sourceText = [
+    issue.title,
+    issue.description,
+    issue.task_context,
+    issue.github_issue_number ? `#${issue.github_issue_number}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const normalizedSource = normalizeSearchText(sourceText);
+  const phrases = makeProgressPhrases(issue, normalizedSource);
+  const terms = extractProgressTerms(normalizedSource);
+  const codePhrases = makeProgressCodePhrases(issue, normalizedSource);
+
+  return {
+    matches(searchText) {
+      if (!searchText) return false;
+      if (issue.github_issue_number && searchText.includes(`#${issue.github_issue_number}`)) {
+        return true;
+      }
+
+      let score = 0;
+      let termMatches = 0;
+
+      phrases.forEach((phrase) => {
+        if (searchText.includes(phrase)) score += 8;
+      });
+
+      terms.forEach((term) => {
+        if (searchText.includes(term.value)) {
+          score += term.weight;
+          termMatches += 1;
+        }
+      });
+
+      return score >= 8 || (score >= 6 && termMatches >= 2);
+    },
+    matchesCode(searchText) {
+      if (!searchText) return false;
+      if (issue.github_issue_number && searchText.includes(`#${issue.github_issue_number}`)) {
+        return true;
+      }
+
+      let score = 0;
+      let hits = 0;
+
+      codePhrases.forEach((phrase) => {
+        if (searchText.includes(phrase.value)) {
+          score += phrase.weight;
+          hits += 1;
+        }
+      });
+
+      terms.forEach((term) => {
+        if (searchText.includes(term.value)) {
+          score += Math.max(1, term.weight - 1);
+          hits += 1;
+        }
+      });
+
+      return score >= 10 || (score >= 7 && hits >= 2);
+    },
+  };
+}
+
+function makeProgressCodePhrases(issue, normalizedSource) {
+  const phrases = new Map();
+  const add = (value, weight = 4) => {
+    const phrase = normalizeSearchText(value);
+    if (!phrase || isWeakProgressPhrase(phrase)) return;
+    phrases.set(phrase, Math.max(phrases.get(phrase) || 0, weight));
+  };
+
+  add(issue.title, 6);
+  add(String(issue.title || "").replace(/\d+$/, ""), 6);
+  add(issue.task_context, 4);
+
+  const groups = [
+    {
+      patterns: [/ログイン|サインイン|oauth|auth/],
+      phrases: [
+        "authgithub",
+        "handlegithubstart",
+        "handleauthcallback",
+        "supabaseauth",
+        "githuboauth",
+        "sessioncookies",
+        "loginbusy",
+      ],
+    },
+    {
+      patterns: [/リポジトリ|repository|repo/],
+      phrases: [
+        "createrepository",
+        "handlecreaterepository",
+        "listrepositories",
+        "githubrepoid",
+        "availablegithubrepos",
+        "repodialog",
+        "repolist",
+        "repositories",
+      ],
+    },
+    {
+      patterns: [/サイドバー|sidebar/],
+      phrases: ["rendersidebar", "sidebar", "repolist", "selectedrepoid", "openrepodialog"],
+    },
+    {
+      patterns: [/claude|タスク.*生成|生成.*タスク|定義ファイル/],
+      phrases: [
+        "generateclaudetasks",
+        "handlegenerateclaudetasks",
+        "extracttasksfromclaudemarkdown",
+        "claudetask",
+        "claudemd",
+        "taskcontext",
+      ],
+    },
+    {
+      patterns: [/進捗|コミット|commit|プッシュ|push/],
+      phrases: [
+        "syncprogress",
+        "syncissuesprogressfromgithub",
+        "fetchgithubprogresssignals",
+        "progresssync",
+        "githubcommits",
+        "closedissues",
+      ],
+    },
+    {
+      patterns: [/ステータス|状態|カンバン|kanban|ラベル|label/],
+      phrases: ["kanbancolumn", "state", "labels", "githublabel", "contextbadge"],
+    },
+    {
+      patterns: [/コミット|commit|プッシュ|push/],
+      phrases: [
+        "fetchgithubcommits",
+        "fetchgithubcommitdetail",
+        "codesearchtext",
+        "commitsbysha",
+        "branches",
+        "push",
+      ],
+    },
+    {
+      patterns: [/ボード|カンバン|board|kanban/],
+      phrases: ["renderboard", "issuecard", "cardlist", "kanbancolumn", "board", "column"],
+    },
+    {
+      patterns: [/詳細|タップ|題名|単語|タイトル|title/],
+      phrases: [
+        "renderpointdialog",
+        "taskdetail",
+        "description",
+        "dialogtasktitle",
+        "selectedissueid",
+        "maketaskcontexttitle",
+      ],
+    },
+    {
+      patterns: [/story\s*point|storypoint|ポイント|sp:/],
+      phrases: ["storypoint", "story_point", "pointpill", "pointfield", "savepoint"],
+    },
+    {
+      patterns: [/ラベル|label/],
+      phrases: ["labels", "githublabel", "kanbancolumn", "contextbadge"],
+    },
+    {
+      patterns: [/スプリント|sprint|milestone|マイルストーン/],
+      phrases: ["sprint", "rendersprintselect", "sprintsettings", "milestone", "selectedsprintid"],
+    },
+    {
+      patterns: [/evm|pv|ev|ac|稼働|時給|単価/],
+      phrases: [
+        "renderanalytics",
+        "evmdata",
+        "plannedvalue",
+        "earnedvalue",
+        "actualcost",
+        "hourlywage",
+        "pointunitprice",
+      ],
+    },
+    {
+      patterns: [/db|テーブル|rls|database|schema/],
+      phrases: [
+        "createtable",
+        "publicissues",
+        "publicrepositories",
+        "publicusers",
+        "enablerowlevelsecurity",
+        "createpolicy",
+        "supabase",
+      ],
+    },
+    {
+      patterns: [/権限|permission|ロール|アクセス|コラボレーター|オーナー/],
+      phrases: ["permission", "githubaccesstoken", "getprivateuserprofile", "rls", "access"],
+    },
+  ];
+
+  groups.forEach((group) => {
+    if (!group.patterns.some((pattern) => pattern.test(normalizedSource))) return;
+    group.phrases.forEach((phrase) => add(phrase, 5));
+  });
+
+  return Array.from(phrases, ([value, weight]) => ({ value, weight }));
+}
+
+function makeProgressPhrases(issue, normalizedSource) {
+  const phrases = new Set();
+  [
+    issue.title,
+    String(issue.title || "").replace(/\d+$/, ""),
+    issue.task_context,
+  ].forEach((value) => addProgressPhrase(phrases, value));
+
+  const groups = [
+    {
+      patterns: [/ログイン|サインイン|oauth/],
+      phrases: ["ログイン", "サインイン", "oauth"],
+    },
+    {
+      patterns: [/リポジトリ|repository|repo/, /追加|登録|選択/],
+      phrases: ["リポジトリ追加", "リポジトリ登録", "repositoryadd"],
+    },
+    {
+      patterns: [/状態|ステータス|進捗|カンバン|kanban/, /同期/],
+      phrases: ["進捗同期", "ステータス同期", "状態同期", "カンバン同期"],
+    },
+    {
+      patterns: [/コミット|commit/, /プッシュ|push|同期/],
+      phrases: ["コミット同期", "プッシュ同期", "進捗同期"],
+    },
+    {
+      patterns: [/claude|タスク/, /生成|同期/],
+      phrases: ["claude", "タスク生成", "タスク同期"],
+    },
+    {
+      patterns: [/サイドバー|sidebar/],
+      phrases: ["サイドバー", "sidebar"],
+    },
+    {
+      patterns: [/ボード|カンバン|board|kanban/],
+      phrases: ["アジャイルボード", "カンバン", "board", "kanban"],
+    },
+    {
+      patterns: [/evm|pv|ev|ac|稼働|時給|単価/],
+      phrases: ["evm", "pv", "ev", "ac", "稼働時間", "時給", "単価"],
+    },
+  ];
+
+  groups.forEach((group) => {
+    if (group.patterns.every((pattern) => pattern.test(normalizedSource))) {
+      group.phrases.forEach((phrase) => addProgressPhrase(phrases, phrase));
+    }
+  });
+
+  return Array.from(phrases);
+}
+
+function addProgressPhrase(phrases, value) {
+  const phrase = normalizeSearchText(value);
+  if (!phrase || isWeakProgressPhrase(phrase)) return;
+  if (phrase.length < 3 && !/^[a-z0-9]{2,}$/i.test(phrase)) return;
+  phrases.add(phrase);
+}
+
+function isWeakProgressPhrase(value) {
+  return new Set([
+    "github",
+    "issue",
+    "タスク",
+    "同期",
+    "追加",
+    "実装",
+    "表示",
+    "状態",
+    "管理",
+    "画面",
+    "処理",
+  ]).has(value);
+}
+
+function extractProgressTerms(normalizedSource) {
+  const weightedTerms = [
+    ["ログイン", 4],
+    ["oauth", 4],
+    ["サイドバー", 4],
+    ["ヘッダー", 4],
+    ["リポジトリ", 4],
+    ["repository", 4],
+    ["ボード", 3],
+    ["カンバン", 3],
+    ["kanban", 3],
+    ["claude", 4],
+    ["コミット", 4],
+    ["commit", 4],
+    ["プッシュ", 4],
+    ["push", 4],
+    ["進捗", 4],
+    ["ステータス", 4],
+    ["状態", 2],
+    ["同期", 2],
+    ["タスク", 2],
+    ["生成", 3],
+    ["詳細", 3],
+    ["題名", 3],
+    ["単語", 3],
+    ["追加", 2],
+    ["選択", 2],
+    ["保存", 2],
+    ["issue", 2],
+    ["storypoint", 3],
+    ["スプリント", 4],
+    ["マイルストーン", 4],
+    ["ラベル", 3],
+    ["evm", 4],
+    ["pv", 3],
+    ["ac", 3],
+    ["稼働", 3],
+    ["時給", 3],
+    ["単価", 3],
+    ["権限", 4],
+    ["rls", 4],
+    ["db", 3],
+    ["テーブル", 3],
+    ["ユーザー", 3],
+  ];
+
+  const seen = new Set();
+  return weightedTerms.reduce((terms, [rawValue, weight]) => {
+    const value = normalizeSearchText(rawValue);
+    if (!value || seen.has(value) || !normalizedSource.includes(value)) return terms;
+    seen.add(value);
+    terms.push({ value, weight });
+    return terms;
+  }, []);
+}
+
+function normalizeSearchText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/#[0-9]+/g, (match) => match)
+    .replace(/[の]/g, "")
+    .replace(/[^a-z0-9#\u3040-\u30ff\u3400-\u9fff]+/g, "");
+}
+
+async function updateIssueProgressRows(accessToken, updates) {
+  const rows = [];
+
+  for (const update of updates) {
+    const payload = {
+      kanban_column: update.kanban_column,
+      state: update.state,
+      synced_at: update.synced_at,
+    };
+
+    if (update.closed_at !== undefined) {
+      payload.closed_at = update.closed_at;
+    }
+
+    const updatedRows = await supabaseFetch(
+      `/rest/v1/issues?id=eq.${encodeURIComponent(update.id)}&select=${issueSelectColumns()}`,
+      {
+        method: "PATCH",
+        accessToken,
+        headers: {
+          Prefer: "return=representation",
+        },
+        body: payload,
+      },
+    );
+
+    if (Array.isArray(updatedRows)) rows.push(...updatedRows.map(normalizeIssueRow));
+  }
+
+  return rows;
+}
+
+async function updateRepositorySyncedAt(accessToken, repositoryId, syncedAt) {
+  await supabaseFetch(`/rest/v1/repositories?id=eq.${encodeURIComponent(repositoryId)}`, {
+    method: "PATCH",
+    accessToken,
+    headers: {
+      Prefer: "return=minimal",
+    },
+    body: {
+      synced_at: syncedAt,
+    },
+  });
+}
+
 function issueSelectColumns() {
   const baseColumns =
-    "id,repository_id,sprint_id,title,state,kanban_column,story_point,source,assignee_username,assignee_avatar_url,github_html_url,labels,created_at,updated_at";
+    "id,repository_id,sprint_id,github_issue_id,github_issue_number,title,state,kanban_column,story_point,source,assignee_username,assignee_avatar_url,github_html_url,labels,closed_at,synced_at,created_at,updated_at";
   return issueDescriptionColumnAvailable
-    ? `id,repository_id,sprint_id,title,description,state,kanban_column,story_point,source,assignee_username,assignee_avatar_url,github_html_url,labels,created_at,updated_at`
+    ? `id,repository_id,sprint_id,github_issue_id,github_issue_number,title,description,state,kanban_column,story_point,source,assignee_username,assignee_avatar_url,github_html_url,labels,closed_at,synced_at,created_at,updated_at`
     : baseColumns;
 }
 
@@ -1079,6 +1969,66 @@ function normalizeRepositoryInput(body) {
   };
 }
 
+function normalizeManualIssueInput(body) {
+  const title = stringValue(body.title).trim();
+  if (!title) {
+    throw apiError(400, "invalid_issue_title", "タスク名を入力してください。");
+  }
+
+  return {
+    title: title.slice(0, 240),
+    description: stringValue(body.description || title).trim().slice(0, 1000),
+    assigneeUsername: normalizeAssigneeUsername(body.assignee_username || body.assignee),
+    storyPoint: normalizeStoryPoint(body.story_point, { defaultValue: 1 }),
+    kanbanColumn: normalizeKanbanColumn(body.kanban_column || "Backlog"),
+  };
+}
+
+function normalizeIssueUpdateInput(body) {
+  const input = {};
+
+  if (body.kanban_column !== undefined) {
+    input.kanbanColumn = normalizeKanbanColumn(body.kanban_column);
+  }
+
+  if (body.story_point !== undefined) {
+    input.storyPoint = normalizeStoryPoint(body.story_point, { defaultValue: 0 });
+  }
+
+  if (Object.keys(input).length === 0) {
+    throw apiError(400, "empty_issue_update", "更新するタスク情報がありません。");
+  }
+
+  return input;
+}
+
+function normalizeKanbanColumn(value) {
+  const column = stringValue(value).trim();
+  if (!["Backlog", "In Progress", "Done"].includes(column)) {
+    throw apiError(400, "invalid_kanban_column", "カンバン列の指定が不正です。");
+  }
+
+  return column;
+}
+
+function normalizeStoryPoint(value, options = {}) {
+  const rawValue =
+    value === undefined || value === null || value === "" ? options.defaultValue : value;
+  const point = Number(rawValue);
+  if (!Number.isInteger(point) || point < 0 || point > 99) {
+    throw apiError(400, "invalid_story_point", "Story Pointは0以上99以下の整数で入力してください。");
+  }
+
+  return point;
+}
+
+function normalizeAssigneeUsername(value) {
+  const username = stringValue(value).trim();
+  if (!username) return null;
+
+  return username.slice(0, 32);
+}
+
 function isSafeGitHubPathPart(value) {
   return /^[A-Za-z0-9_.-]+$/.test(value);
 }
@@ -1321,7 +2271,7 @@ function apiError(status, code, message) {
 }
 
 function handleApiError(req, res, error) {
-  if (error.status === 401) {
+  if (error.status === 401 && !String(error.code || "").startsWith("github_")) {
     clearSessionCookies(res, req);
   }
 

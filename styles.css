@@ -765,24 +765,6 @@ button {
   color: var(--text);
 }
 
-.sprint-select-field {
-  min-width: 0;
-  width: clamp(180px, 24vw, 240px);
-}
-
-.sprint-settings-button {
-  background: var(--surface);
-  border-color: var(--line);
-  color: var(--text);
-}
-
-.sprint-form {
-  display: grid;
-  grid-template-columns: minmax(160px, 1fr) minmax(120px, 0.7fr) minmax(160px, 1fr);
-  gap: 12px;
-  align-items: end;
-}
-
 .repo-form {
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) minmax(120px, 0.7fr) minmax(120px, 0.7fr);
@@ -809,6 +791,20 @@ button {
 
 .board-message {
   margin: 0 0 14px;
+}
+
+.board-sync-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -6px 0 14px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.board-sync-meta time {
+  color: var(--text);
 }
 
 .form-note {
@@ -1161,32 +1157,18 @@ button {
 
   .header-actions,
   .tabs,
-  .toolbar-actions,
-  .sprint-select-field {
+  .toolbar-actions {
     width: 100%;
   }
 
   .toolbar-actions,
-  .sprint-form,
   .repo-form {
     display: grid;
     grid-template-columns: 1fr;
   }
 
-  .toolbar-actions:has(.sprint-settings-button) {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto 40px;
-    align-items: end;
-    gap: 8px;
-    padding-right: 0;
-  }
-
   .compact-panel .form-row {
     grid-template-columns: minmax(0, 1fr) auto auto;
-  }
-
-  .sprint-select-field {
-    min-width: 0;
   }
 
   .task-form {
@@ -1273,7 +1255,6 @@ button {
   .toolbar,
   .toolbar-actions,
   .form-row,
-  .sprint-form,
   .repo-form,
   .task-form,
   .summary-grid {
@@ -1308,10 +1289,6 @@ button {
     font-size: 11px;
   }
 
-  .toolbar-actions:has(.sprint-settings-button) {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .tabs {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1328,14 +1305,9 @@ button {
     width: 100%;
   }
 
-  .sprint-settings-button,
   .modal-close,
   .menu-button {
     width: 40px;
-  }
-
-  .toolbar-actions:has(.sprint-settings-button) .sprint-select-field {
-    width: 100%;
   }
 
   .panel-header,
