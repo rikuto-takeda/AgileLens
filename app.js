@@ -1,6 +1,12 @@
+const initialRoute = parseRoute();
+
 const state = {
-  loggedIn: window.location.hash !== "#/login",
-  view: window.location.hash.includes("analytics") ? "analytics" : "board",
+  authChecking: true,
+  authConfigured: true,
+  authError: null,
+  loggedIn: false,
+  user: null,
+  view: initialRoute.view,
   selectedRepoId: "repo-1",
   selectedSprintId: "sprint-1",
   selectedAnalyticsSprintId: "sprint-1",
@@ -161,13 +167,17 @@ function ensureSprintSelection() {
 }
 
 function routeTo(view) {
-  state.loggedIn = true;
   state.view = view;
   window.location.hash = `/projects/${state.selectedRepoId}/${view}`;
   render();
 }
 
 function render() {
+  if (state.authChecking) {
+    renderAuthLoading();
+    return;
+  }
+
   if (!state.loggedIn) {
     renderLogin();
     return;
@@ -193,6 +203,7 @@ function render() {
               <button class="tab-button ${state.view === "board" ? "active" : ""}" data-view="board">アジャイルボード</button>
               <button class="tab-button ${state.view === "analytics" ? "active" : ""}" data-view="analytics">EVMアナリティクス</button>
             </div>
+            ${renderUserMenu()}
           </div>
         </header>
         <section class="content">
@@ -206,7 +217,24 @@ function render() {
   bindDashboardEvents();
 }
 
+function renderAuthLoading() {
+  app.innerHTML = `
+    <main class="login-shell">
+      <section class="login-panel" aria-labelledby="loading-title">
+        <div class="brand">
+          <div class="brand-mark">AL</div>
+          <h1 id="loading-title">AgileLens</h1>
+          <p>認証状態を確認しています。</p>
+        </div>
+      </section>
+    </main>
+  `;
+}
+
 function renderLogin() {
+  const loginError = state.authError || loginErrorMessage();
+  const disabled = state.loginBusy || !state.authConfigured;
+
   app.innerHTML = `
     <main class="login-shell">
       <section class="login-panel" aria-labelledby="login-title">
@@ -215,19 +243,37 @@ function renderLogin() {
           <h1 id="login-title">AgileLens</h1>
           <p>GitHub IssueをカンバンとEVMで可視化するMVPダッシュボード</p>
         </div>
-        <button class="github-button" data-action="login">
+        ${loginError ? `<p class="login-message">${loginError}</p>` : ""}
+        <button class="github-button" data-action="login" ${disabled ? "disabled" : ""}>
           <span aria-hidden="true">●</span>
-          GitHubでサインイン
+          ${state.loginBusy ? "GitHubへ移動しています" : "GitHubでサインイン"}
         </button>
       </section>
     </main>
   `;
 
   document.querySelector("[data-action='login']").addEventListener("click", () => {
-    state.loggedIn = true;
-    window.location.hash = `/projects/${state.selectedRepoId}/board`;
+    state.loginBusy = true;
     render();
+    window.location.href = "/auth/github";
   });
+}
+
+function renderUserMenu() {
+  if (!state.user) return "";
+
+  const rawUsername = state.user.username || "GitHub user";
+  const username = escapeHtml(rawUsername);
+  const avatar = state.user.avatar_url
+    ? `<img src="${escapeHtml(state.user.avatar_url)}" alt="" />`
+    : `<span>${username.slice(0, 2).toUpperCase()}</span>`;
+
+  return `
+    <div class="user-menu">
+      <div class="user-avatar" title="${username}">${avatar}</div>
+      <button class="logout-button" data-action="logout">ログアウト</button>
+    </div>
+  `;
 }
 
 function renderSidebar() {
@@ -678,6 +724,13 @@ function bindDashboardEvents() {
     });
   });
 
+  const logoutButton = document.querySelector("[data-action='logout']");
+  if (logoutButton) {
+    logoutButton.addEventListener("click", async () => {
+      await logout();
+    });
+  }
+
   const actionMap = {
     "add-repo": "リポジトリ追加フロー: CLAUDE.md解析とIssue自動生成を開始します",
     "save-hours": "本日の稼働時間を登録し、ACスナップショットを更新しました",
@@ -838,10 +891,100 @@ function calculateDueDate(startDate, cycleDays) {
   return date.toISOString().slice(0, 10);
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function parseRoute() {
+  const hash = window.location.hash || "";
+  return {
+    isLogin: hash.startsWith("#/login"),
+    view: hash.includes("analytics") ? "analytics" : "board",
+  };
+}
+
+function loginErrorMessage() {
+  const [, query = ""] = (window.location.hash || "").split("?");
+  const error = new URLSearchParams(query).get("auth_error");
+  const messages = {
+    missing_supabase_config: "Supabase URLとAnon Keyを設定してください。",
+    invalid_auth_callback: "OAuthの検証に失敗しました。もう一度ログインしてください。",
+    exchange_failed: "GitHubログインの完了処理に失敗しました。",
+    access_denied: "GitHubログインがキャンセルされました。",
+  };
+
+  return error ? messages[error] || "ログインに失敗しました。もう一度試してください。" : "";
+}
+
+async function initAuth() {
+  const route = parseRoute();
+  state.view = route.view;
+
+  try {
+    const response = await fetch("/api/auth/me", {
+      credentials: "same-origin",
+    });
+    if (!response.ok) throw new Error("Failed to load auth session");
+
+    const data = await response.json();
+    state.authConfigured = data.configured !== false;
+    state.loggedIn = Boolean(data.authenticated);
+    state.user = data.user || null;
+    state.authError = state.authConfigured
+      ? null
+      : "Supabase URLとAnon Keyを.envに設定してください。";
+  } catch (error) {
+    state.authConfigured = true;
+    state.loggedIn = false;
+    state.user = null;
+    state.authError = "認証サーバーに接続できませんでした。";
+  } finally {
+    state.authChecking = false;
+    state.loginBusy = false;
+
+    const latestRoute = parseRoute();
+    if (!state.loggedIn && !latestRoute.isLogin) {
+      window.location.hash = "/login";
+      return;
+    }
+
+    if (state.loggedIn && latestRoute.isLogin) {
+      window.location.hash = `/projects/${state.selectedRepoId}/${state.view}`;
+      return;
+    }
+
+    render();
+  }
+}
+
+async function logout() {
+  await fetch("/api/auth/logout", {
+    method: "POST",
+    credentials: "same-origin",
+  }).catch(() => null);
+
+  state.loggedIn = false;
+  state.user = null;
+  state.authError = null;
+  state.loginBusy = false;
+  window.location.hash = "/login";
+  render();
+}
+
 window.addEventListener("hashchange", () => {
-  state.loggedIn = window.location.hash !== "#/login";
-  state.view = window.location.hash.includes("analytics") ? "analytics" : "board";
+  const route = parseRoute();
+  state.view = route.view;
+  if (!state.authChecking && !state.loggedIn && !route.isLogin) {
+    window.location.hash = "/login";
+    return;
+  }
   render();
 });
 
 render();
+initAuth();
