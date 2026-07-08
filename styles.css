@@ -137,9 +137,14 @@ button {
 }
 
 .sidebar {
-  min-height: 100vh;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: #101820;
   color: white;
 }
@@ -176,9 +181,14 @@ button {
 }
 
 .repo-list {
+  min-height: 0;
+  flex: 1 1 auto;
   display: grid;
+  align-content: start;
   gap: 8px;
   padding: 14px 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .repo-empty {
@@ -274,9 +284,11 @@ button {
 }
 
 .sidebar-footer {
-  margin-top: auto;
+  flex: 0 0 auto;
+  margin-top: 0;
   padding: 12px 10px 14px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
+  background: #101820;
 }
 
 .add-repo-button {
@@ -327,6 +339,10 @@ button {
 
 .project-title {
   min-width: 0;
+}
+
+.mobile-header-brand {
+  display: none;
 }
 
 .project-title h2 {
@@ -578,6 +594,7 @@ button {
 }
 
 .card-list {
+  min-width: 0;
   display: grid;
   align-content: start;
   gap: 8px;
@@ -598,6 +615,7 @@ button {
 }
 
 .issue-card {
+  min-width: 0;
   padding: 12px;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -617,6 +635,7 @@ button {
 }
 
 .issue-meta {
+  min-width: 0;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -637,6 +656,7 @@ button {
 }
 
 .context-badge {
+  min-width: 0;
   max-width: min(150px, 70%);
   min-height: 26px;
   display: inline-flex;
@@ -699,6 +719,14 @@ button {
   gap: 18px;
 }
 
+.evm-dashboard-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(430px, 1.15fr) minmax(300px, 0.8fr) minmax(360px, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
 .analytics-top {
   display: grid;
   grid-template-columns: 1fr;
@@ -717,7 +745,7 @@ button {
 .evm-control-row {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(320px, 1fr) minmax(340px, 0.9fr);
+  grid-template-columns: minmax(240px, 1fr) minmax(170px, 0.7fr);
   gap: 12px;
   align-items: start;
 }
@@ -742,7 +770,7 @@ button {
 
 .evm-period-table th,
 .evm-period-table td {
-  padding: 6px;
+  padding: 5px;
   border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: bottom;
@@ -756,12 +784,13 @@ button {
 
 .evm-period-table input {
   width: 100%;
-  min-height: 32px;
-  padding: 0 8px;
+  min-height: 30px;
+  padding: 0 6px;
   border: 1px solid var(--line-strong);
   border-radius: 7px;
   background: white;
   color: var(--text);
+  font-size: 12px;
 }
 
 .evm-control-table th:nth-child(3),
@@ -783,8 +812,8 @@ button {
 }
 
 .evm-hours-table td {
-  width: 132px;
-  min-width: 132px;
+  width: 88px;
+  min-width: 88px;
   text-align: center;
 }
 
@@ -1078,6 +1107,11 @@ button {
   gap: 12px;
 }
 
+.evm-summary-panel .summary-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .metric {
   padding: 14px;
   background: var(--surface-muted);
@@ -1096,6 +1130,15 @@ button {
   margin-top: 8px;
   font-size: 22px;
   overflow-wrap: anywhere;
+}
+
+.evm-summary-panel .metric {
+  padding: 8px 10px;
+}
+
+.evm-summary-panel .metric strong {
+  margin-top: 4px;
+  font-size: 15px;
 }
 
 .metric-good {
@@ -1227,6 +1270,10 @@ button {
 }
 
 @media (max-width: 1180px) {
+  .evm-dashboard-row {
+    grid-template-columns: 1fr;
+  }
+
   .analytics-top {
     grid-template-columns: 1fr;
   }
@@ -1246,7 +1293,8 @@ button {
     inset: 0 auto 0 0;
     z-index: 30;
     width: min(280px, calc(100vw - 56px));
-    min-height: 100vh;
+    height: 100vh;
+    min-height: 0;
     transform: translateX(-100%);
     transition: transform 180ms ease;
     box-shadow: var(--shadow);
@@ -1279,6 +1327,56 @@ button {
     place-items: center;
   }
 
+  .header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px 12px;
+  }
+
+  .header-project {
+    grid-column: 1;
+  }
+
+  .mobile-header-brand {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 17px;
+    font-weight: 800;
+  }
+
+  .mobile-brand-mark {
+    width: 30px;
+    height: 30px;
+    flex: 0 0 30px;
+    display: grid;
+    place-items: center;
+    border-radius: 7px;
+    background: var(--accent);
+    color: white;
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .project-title {
+    display: none;
+  }
+
+  .header-actions {
+    display: contents;
+  }
+
+  .header-actions .user-menu {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .header-actions .tabs {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
   .repo-list {
     grid-template-columns: 1fr;
     overflow-x: visible;
@@ -1288,9 +1386,9 @@ button {
     margin-top: 0;
   }
 
-  .header,
   .toolbar,
-  .analytics-top {
+  .analytics-top,
+  .evm-dashboard-row {
     display: grid;
     grid-template-columns: 1fr;
   }
@@ -1336,6 +1434,36 @@ button {
     padding: 10px 12px;
   }
 
+  .header-actions {
+    display: contents;
+  }
+
+  .header-actions .user-menu {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .header-actions .tabs {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .user-menu {
+    gap: 6px;
+  }
+
+  .user-avatar {
+    width: 30px;
+    height: 30px;
+  }
+
+  .logout-button {
+    min-height: 30px;
+    padding: 0 8px;
+    font-size: 11px;
+  }
+
   .project-title h2 {
     font-size: 17px;
   }
@@ -1379,7 +1507,43 @@ button {
   }
 
   .evm-control-table {
-    min-width: 420px;
+    min-width: 0;
+  }
+
+  .evm-control-table th,
+  .evm-control-table td {
+    padding: 3px;
+  }
+
+  .evm-control-table th {
+    font-size: 10px;
+    line-height: 1.25;
+  }
+
+  .evm-control-table input {
+    min-width: 0;
+    min-height: 28px;
+    padding: 0 3px;
+    font-size: 11px;
+  }
+
+  .evm-control-table input[type="date"]::-webkit-calendar-picker-indicator {
+    width: 12px;
+    height: 12px;
+    margin: 0;
+    padding: 0;
+  }
+
+  .evm-control-table th:nth-child(3),
+  .evm-control-table td:nth-child(3) {
+    width: 48px;
+  }
+
+  .evm-period-panel .primary-button {
+    width: 100%;
+    min-height: 28px;
+    padding: 0 4px;
+    font-size: 11px;
   }
 
   .compact-panel .field label {
@@ -1401,15 +1565,33 @@ button {
     padding: 0 6px;
   }
 
+  .evm-period-panel .primary-button {
+    min-height: 28px;
+    padding: 0 4px;
+  }
+
   .board {
+    grid-template-columns: minmax(0, 1fr);
     gap: 8px;
+  }
+
+  .column {
+    min-width: 0;
+  }
+
+  .issue-meta {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .context-badge {
+    max-width: 100%;
   }
 
   .repo-list {
     grid-template-columns: 1fr;
   }
 
-  .header-actions,
   .toolbar,
   .toolbar-actions,
   .form-row,
@@ -1569,7 +1751,7 @@ button {
   }
 
   .context-badge {
-    max-width: 96px;
+    max-width: 100%;
     min-height: 22px;
     padding: 0 6px;
     font-size: 9px;

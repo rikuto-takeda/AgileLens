@@ -170,6 +170,10 @@ function render() {
         <header class="header">
           <div class="header-project">
             <button class="menu-button" data-action="toggle-sidebar" aria-label="サイドバーを開く">☰</button>
+            <div class="mobile-header-brand">
+              <span class="mobile-brand-mark">AL</span>
+              <span>AgileLens</span>
+            </div>
             <div class="project-title">
               <h2>${repo ? escapeHtml(repo.repo_name) : "リポジトリ未登録"}</h2>
               <span>${repo ? escapeHtml(repo.full_name || `${repo.owner_name}/${repo.repo_name}`) : "GitHub repository"}</span>
@@ -596,44 +600,12 @@ function renderAnalytics() {
           <p>プロジェクト全体のPV/EV/ACを可視化します。</p>
         </div>
       </div>
-      ${renderEvmControlRow(summary, repo)}
-      ${renderEvmWorkingHoursTable(summary)}
-      ${state.evmError ? `<p class="form-error board-message">${escapeHtml(state.evmError)}</p>` : ""}
-      <div class="analytics-top">
-        <section class="panel">
-          <div class="panel-header">
-            <h3>サマリー</h3>
-          </div>
-          <div class="panel-body">
-            <div class="summary-grid">
-              <div class="metric">
-                <span>BAC</span>
-                <strong>${formatCurrency(summary.bac ?? summary.total_budget ?? 0)}</strong>
-              </div>
-              <div class="metric">
-                <span>進捗率</span>
-                <strong>${formatPercent(summary.progress_rate)}</strong>
-              </div>
-              <div class="metric">
-                <span>SV</span>
-                <strong class="${summary.schedule_variance >= 0 ? "metric-good" : "metric-bad"}">${formatCurrency(summary.schedule_variance)}</strong>
-              </div>
-              <div class="metric">
-                <span>CV</span>
-                <strong class="${summary.cost_variance >= 0 ? "metric-good" : "metric-bad"}">${formatCurrency(summary.cost_variance)}</strong>
-              </div>
-              <div class="metric">
-                <span>SPI</span>
-                <strong class="${summary.spi >= 1 ? "metric-good" : "metric-bad"}">${Number(summary.spi || 0).toFixed(2)}</strong>
-              </div>
-              <div class="metric">
-                <span>CPI</span>
-                <strong class="${summary.cpi >= 1 ? "metric-good" : "metric-bad"}">${Number(summary.cpi || 0).toFixed(2)}</strong>
-              </div>
-            </div>
-          </div>
-        </section>
+      <div class="evm-dashboard-row">
+        ${renderEvmControlRow(summary, repo)}
+        ${renderEvmWorkingHoursTable(summary)}
+        ${renderEvmSummaryPanel(summary)}
       </div>
+      ${state.evmError ? `<p class="form-error board-message">${escapeHtml(state.evmError)}</p>` : ""}
       <section class="panel">
         <div class="panel-header">
           <h3>EVM推移</h3>
@@ -652,6 +624,44 @@ function renderAnalytics() {
         </div>
       </section>
     </div>
+  `;
+}
+
+function renderEvmSummaryPanel(summary) {
+  return `
+    <section class="panel evm-summary-panel">
+      <div class="panel-header">
+        <h3>サマリー</h3>
+      </div>
+      <div class="panel-body">
+        <div class="summary-grid">
+          <div class="metric">
+            <span>BAC</span>
+            <strong>${formatCurrency(summary.bac ?? summary.total_budget ?? 0)}</strong>
+          </div>
+          <div class="metric">
+            <span>進捗率</span>
+            <strong>${formatPercent(summary.progress_rate)}</strong>
+          </div>
+          <div class="metric">
+            <span>SV</span>
+            <strong class="${summary.schedule_variance >= 0 ? "metric-good" : "metric-bad"}">${formatCurrency(summary.schedule_variance)}</strong>
+          </div>
+          <div class="metric">
+            <span>CV</span>
+            <strong class="${summary.cost_variance >= 0 ? "metric-good" : "metric-bad"}">${formatCurrency(summary.cost_variance)}</strong>
+          </div>
+          <div class="metric">
+            <span>SPI</span>
+            <strong class="${summary.spi >= 1 ? "metric-good" : "metric-bad"}">${Number(summary.spi || 0).toFixed(2)}</strong>
+          </div>
+          <div class="metric">
+            <span>CPI</span>
+            <strong class="${summary.cpi >= 1 ? "metric-good" : "metric-bad"}">${Number(summary.cpi || 0).toFixed(2)}</strong>
+          </div>
+        </div>
+      </div>
+    </section>
   `;
 }
 
