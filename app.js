@@ -24,6 +24,10 @@ const state = {
   githubRepoLoading: false,
   githubRepoLoadError: null,
   availableGithubRepos: [],
+  issuesLoading: false,
+  issuesLoadError: null,
+  claudeTaskGenerating: false,
+  claudeTaskError: null,
   repoForm: {
     github_repo_id: "",
   },
@@ -66,53 +70,7 @@ const sprints = [
   },
 ];
 
-const issues = [
-  {
-    id: "issue-1",
-    repository_id: "repo-1",
-    sprint_id: "sprint-1",
-    title: "GitHub OAuthログイン画面を実装する",
-    assignee: "AK",
-    story_point: 3,
-    kanban_column: "Backlog",
-  },
-  {
-    id: "issue-2",
-    repository_id: "repo-1",
-    sprint_id: "sprint-1",
-    title: "リポジトリ追加時にCLAUDE.mdを読み込むUIを作る",
-    assignee: "MN",
-    story_point: 5,
-    kanban_column: "Backlog",
-  },
-  {
-    id: "issue-3",
-    repository_id: "repo-1",
-    sprint_id: "sprint-1",
-    title: "Issueカードのドラッグ＆ドロップ同期を設計する",
-    assignee: "ST",
-    story_point: 8,
-    kanban_column: "In Progress",
-  },
-  {
-    id: "issue-4",
-    repository_id: "repo-1",
-    sprint_id: "sprint-2",
-    title: "EVM日次スナップショットの集計表示を確認する",
-    assignee: "YK",
-    story_point: 3,
-    kanban_column: "In Progress",
-  },
-  {
-    id: "issue-5",
-    repository_id: "repo-1",
-    sprint_id: "sprint-1",
-    title: "MVP仕様レビューを完了する",
-    assignee: "AK",
-    story_point: 2,
-    kanban_column: "Done",
-  },
-];
+let issues = [];
 
 const evmData = [
   { day: "Day 1", pv: 12000, ev: 0, ac: 18000 },
@@ -396,7 +354,8 @@ function renderBoard() {
   const sprint = currentSprint();
   const repoIssues = issues.filter(
     (issue) =>
-      issue.repository_id === state.selectedRepoId && issue.sprint_id === state.selectedSprintId,
+      issue.repository_id === state.selectedRepoId &&
+      (!issue.sprint_id || issue.sprint_id === state.selectedSprintId),
   );
   const columns = [
     { key: "Backlog", label: "未着手" },
@@ -412,9 +371,14 @@ function renderBoard() {
       </div>
       <div class="toolbar-actions">
         ${renderSprintSelect("board-sprint")}
+        <button class="secondary-button" data-action="generate-claude-tasks" ${state.claudeTaskGenerating ? "disabled" : ""}>
+          ${state.claudeTaskGenerating ? "生成中" : "CLAUDE.mdから生成"}
+        </button>
         <button class="icon-button sprint-settings-button" data-action="open-sprint-dialog" aria-label="スプリント設定" title="スプリント設定">⚙</button>
       </div>
     </div>
+    ${state.issuesLoadError ? `<p class="form-error board-message">${escapeHtml(state.issuesLoadError)}</p>` : ""}
+    ${state.claudeTaskError ? `<p class="form-error board-message">${escapeHtml(state.claudeTaskError)}</p>` : ""}
     <div class="board">
       ${columns
         .map((column) => {
@@ -433,7 +397,13 @@ function renderBoard() {
                 <span class="count-pill">${columnIssues.length}</span>
               </div>
               <div class="card-list">
-                ${columnIssues.map(renderIssueCard).join("")}
+                ${
+                  state.issuesLoading
+                    ? '<div class="column-empty">タスクを読み込んでいます</div>'
+                    : columnIssues.length > 0
+                      ? columnIssues.map(renderIssueCard).join("")
+                      : `<div class="column-empty">${column.key === "Backlog" ? "タスク未登録" : "該当タスクなし"}</div>`
+                }
               </div>
             </section>
           `;
@@ -525,16 +495,21 @@ function renderTaskDialog() {
 function renderPointDialog() {
   const issue = issues.find((item) => item.id === state.selectedIssueId);
   if (!issue) return "";
+  const description = issue.description || "詳細は未登録です。";
 
   return `
     <div class="modal-backdrop" data-action="close-point-dialog">
       <section class="modal" role="dialog" aria-modal="true" aria-labelledby="point-dialog-title">
         <div class="modal-header">
-          <h3 id="point-dialog-title">Story Point設定</h3>
+          <h3 id="point-dialog-title">タスク詳細</h3>
           <button class="icon-button modal-close" data-action="close-point-dialog" aria-label="閉じる">×</button>
         </div>
         <div class="modal-body">
-          <p class="dialog-task-title">${issue.title}</p>
+          <p class="dialog-task-title">${escapeHtml(issue.title)}</p>
+          <div class="task-detail-block">
+            <span>詳細</span>
+            <p>${escapeHtml(description)}</p>
+          </div>
           <div class="field">
             <label for="edit-story-point">Story Point</label>
             <select id="edit-story-point" data-point-field="story_point">
@@ -591,15 +566,38 @@ function formatShortDate(dateText) {
 }
 
 function renderIssueCard(issue) {
+  const assignee = issue.assignee || issue.assignee_username || "NA";
+  const context = issue.task_context || (issue.source === "claude" ? "CLAUDE" : assignee);
+  const contextClass = contextBadgeClass(context);
+
   return `
     <article class="issue-card" draggable="true" data-issue-id="${issue.id}">
-      <p class="issue-title">${issue.title}</p>
+      <p class="issue-title">${escapeHtml(issue.title)}</p>
       <div class="issue-meta">
-        <span class="avatar" title="担当者">${issue.assignee}</span>
+        <span class="context-badge ${contextClass}" title="${escapeHtml(context)}">${escapeHtml(context)}</span>
         <span class="point-pill">sp:${issue.story_point}</span>
       </div>
     </article>
   `;
+}
+
+function contextBadgeClass(context) {
+  if (/^1\b|画面|UI|ログイン|ボード|サイドバー|ヘッダー/.test(context)) {
+    return "context-ui";
+  }
+  if (/^2\b|DB|テーブル|RLS/.test(context)) {
+    return "context-db";
+  }
+  if (/EVM|PV|EV|AC/.test(context)) {
+    return "context-evm";
+  }
+  if (/^3\b|同期|フロー|GitHub/.test(context)) {
+    return "context-flow";
+  }
+  if (/^4\b|権限|ロール/.test(context)) {
+    return "context-auth";
+  }
+  return "context-default";
 }
 
 function renderAnalytics() {
@@ -757,7 +755,7 @@ function bindDashboardEvents() {
   });
 
   document.querySelectorAll("[data-repo-id]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       state.selectedRepoId = button.dataset.repoId;
       ensureDefaultSprint(state.selectedRepoId);
       const nextSprint = sprints.find((sprint) => sprint.repository_id === state.selectedRepoId);
@@ -765,8 +763,13 @@ function bindDashboardEvents() {
         state.selectedSprintId = nextSprint.id;
         state.selectedAnalyticsSprintId = nextSprint.id;
       }
+      state.issuesLoading = true;
+      state.issuesLoadError = null;
+      state.claudeTaskError = null;
       state.sidebarOpen = false;
       window.location.hash = `/projects/${state.selectedRepoId}/${state.view}`;
+      render();
+      await loadIssues(state.selectedRepoId);
       render();
     });
   });
@@ -920,6 +923,13 @@ function bindDashboardEvents() {
     });
   }
 
+  const generateClaudeTasksButton = document.querySelector("[data-action='generate-claude-tasks']");
+  if (generateClaudeTasksButton) {
+    generateClaudeTasksButton.addEventListener("click", async () => {
+      await generateClaudeTasks();
+    });
+  }
+
   const createTaskButton = document.querySelector("[data-action='create-task']");
   if (createTaskButton) {
     createTaskButton.addEventListener("click", () => {
@@ -1053,6 +1063,26 @@ async function loadRepositories() {
   }
 }
 
+async function loadIssues(repositoryId = state.selectedRepoId) {
+  if (!repositoryId) {
+    issues = [];
+    return;
+  }
+
+  state.issuesLoading = true;
+  state.issuesLoadError = null;
+
+  try {
+    const data = await apiRequest(`/api/repositories/${encodeURIComponent(repositoryId)}/issues`);
+    issues = data.issues || [];
+  } catch (error) {
+    issues = [];
+    state.issuesLoadError = error.message;
+  } finally {
+    state.issuesLoading = false;
+  }
+}
+
 async function loadGithubRepositories() {
   state.githubRepoLoading = true;
   state.githubRepoLoadError = null;
@@ -1134,12 +1164,44 @@ async function createRepository() {
     state.availableGithubRepos = state.availableGithubRepos.map((repo) =>
       repo.id === String(repository.github_repo_id) ? { ...repo, registered: true } : repo,
     );
+    issues = [];
+    await loadIssues(repository.id);
     window.location.hash = `/projects/${repository.id}/board`;
     render();
     showToast(`${repository.owner_name}/${repository.repo_name} を追加しました`);
   } catch (error) {
     state.repoSaveBusy = false;
     state.repoSaveError = error.message;
+    render();
+  }
+}
+
+async function generateClaudeTasks() {
+  if (!state.selectedRepoId) return;
+
+  state.claudeTaskGenerating = true;
+  state.claudeTaskError = null;
+  render();
+
+  try {
+    const data = await apiRequest(
+      `/api/repositories/${encodeURIComponent(state.selectedRepoId)}/generate-claude-tasks`,
+      {
+        method: "POST",
+      },
+    );
+    issues = data.issues || [];
+    state.claudeTaskGenerating = false;
+    render();
+
+    if (data.created_count > 0) {
+      showToast(`CLAUDE.mdから${data.created_count}件のタスクを生成しました`);
+    } else {
+      showToast("CLAUDE.md由来のタスクはすでに登録済みです");
+    }
+  } catch (error) {
+    state.claudeTaskGenerating = false;
+    state.claudeTaskError = error.message;
     render();
   }
 }
@@ -1191,6 +1253,7 @@ async function initAuth() {
       : "Supabase URLとAnon Keyを.envに設定してください。";
     if (state.loggedIn) {
       await loadRepositories();
+      await loadIssues();
     }
   } catch (error) {
     state.authConfigured = true;
@@ -1248,9 +1311,10 @@ window.addEventListener("hashchange", () => {
   }
   if (state.loggedIn && route.repoId) {
     const repo = repositories.find((item) => item.id === route.repoId);
-    if (repo) {
+    if (repo && state.selectedRepoId !== repo.id) {
       state.selectedRepoId = repo.id;
       ensureDefaultSprint(repo.id);
+      loadIssues(repo.id).then(() => render());
     }
   }
   render();

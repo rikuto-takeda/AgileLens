@@ -34,6 +34,8 @@ const mimeTypes = {
   ".ico": "image/x-icon",
 };
 
+let issueDescriptionColumnAvailable = true;
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, getRequestOrigin(req));
@@ -60,6 +62,20 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/api/repositories") {
       await handleListRepositories(req, res);
+      return;
+    }
+
+    const issuesMatch = url.pathname.match(/^\/api\/repositories\/([^/]+)\/issues$/);
+    if (req.method === "GET" && issuesMatch) {
+      await handleListIssues(req, res, decodeURIComponent(issuesMatch[1]));
+      return;
+    }
+
+    const generateTasksMatch = url.pathname.match(
+      /^\/api\/repositories\/([^/]+)\/generate-claude-tasks$/,
+    );
+    if (req.method === "POST" && generateTasksMatch) {
+      await handleGenerateClaudeTasks(req, res, decodeURIComponent(generateTasksMatch[1]));
       return;
     }
 
@@ -195,6 +211,55 @@ async function handleListRepositories(req, res) {
     const { accessToken } = await getAuthenticatedContext(req, res);
     const repositories = await listRepositories(accessToken);
     sendJson(res, 200, { repositories });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleListIssues(req, res, repositoryId) {
+  try {
+    const { accessToken, user } = await getAuthenticatedContext(req, res);
+    const repository = await getRepositoryById(accessToken, repositoryId);
+    const profile = await getPrivateUserProfile(accessToken, user);
+    const issues = await listIssues(accessToken, repositoryId);
+    const claudeTasks = await getClaudeTasksForDisplay(repository, profile?.github_access_token);
+
+    sendJson(res, 200, { issues: applyClaudeTaskDisplayTitles(issues, claudeTasks) });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleGenerateClaudeTasks(req, res, repositoryId) {
+  try {
+    const { accessToken, user } = await getAuthenticatedContext(req, res);
+    const repository = await getRepositoryById(accessToken, repositoryId);
+    const profile = await getPrivateUserProfile(accessToken, user);
+    const markdown = await fetchGithubFileContent(repository, "CLAUDE.md", profile?.github_access_token);
+    const tasks = extractTasksFromClaudeMarkdown(markdown);
+
+    if (tasks.length === 0) {
+      throw apiError(422, "claude_tasks_not_found", "CLAUDE.mdから生成できるタスクが見つかりませんでした。");
+    }
+
+    const existingIssues = await listIssues(accessToken, repositoryId);
+    const existingTitles = new Set(
+      existingIssues.map((issue) => normalizeComparableTask(issue.description || issue.title)),
+    );
+    const newTasks = tasks.filter((task) => !existingTitles.has(normalizeComparableTask(task.description)));
+
+    const createdIssues =
+      newTasks.length > 0
+        ? await insertClaudeIssues(accessToken, repositoryId, newTasks)
+        : [];
+    const issues = await listIssues(accessToken, repositoryId);
+
+    sendJson(res, 201, {
+      created_count: createdIssues.length,
+      skipped_count: tasks.length - newTasks.length,
+      source_path: "CLAUDE.md",
+      issues: applyClaudeTaskDisplayTitles(issues, tasks),
+    });
   } catch (error) {
     handleApiError(req, res, error);
   }
@@ -381,6 +446,23 @@ async function getPrivateUserProfile(accessToken, user) {
   return Array.isArray(rows) ? rows[0] : null;
 }
 
+async function getRepositoryById(accessToken, repositoryId) {
+  const rows = await supabaseFetch(
+    `/rest/v1/repositories?id=eq.${encodeURIComponent(
+      repositoryId,
+    )}&select=id,github_repo_id,repo_name,owner_name,full_name,hourly_wage,point_unit_price,synced_at,created_at&limit=1`,
+    {
+      method: "GET",
+      accessToken,
+    },
+  );
+  const repository = Array.isArray(rows) ? rows[0] : null;
+  if (!repository) {
+    throw apiError(404, "repository_not_found", "リポジトリが見つかりません。");
+  }
+  return repository;
+}
+
 async function listRepositories(accessToken) {
   const rows = await supabaseFetch(
     "/rest/v1/repositories?select=id,github_repo_id,repo_name,owner_name,full_name,hourly_wage,point_unit_price,synced_at,created_at&order=created_at.asc",
@@ -390,6 +472,177 @@ async function listRepositories(accessToken) {
     },
   );
   return Array.isArray(rows) ? rows : [];
+}
+
+async function listIssues(accessToken, repositoryId) {
+  try {
+    const rows = await fetchIssueRows(accessToken, repositoryId);
+    return Array.isArray(rows) ? rows.map(normalizeIssueRow) : [];
+  } catch (error) {
+    if (!issueDescriptionColumnAvailable || !isMissingIssueDescriptionColumn(error)) {
+      throw error;
+    }
+
+    issueDescriptionColumnAvailable = false;
+    const rows = await fetchIssueRows(accessToken, repositoryId);
+    return Array.isArray(rows) ? rows.map(normalizeIssueRow) : [];
+  }
+}
+
+async function insertClaudeIssues(accessToken, repositoryId, tasks) {
+  try {
+    const rows = await insertIssueRows(accessToken, repositoryId, tasks);
+    return Array.isArray(rows) ? rows.map(normalizeIssueRow) : [];
+  } catch (error) {
+    if (!issueDescriptionColumnAvailable || !isMissingIssueDescriptionColumn(error)) {
+      throw error;
+    }
+
+    issueDescriptionColumnAvailable = false;
+    const rows = await insertIssueRows(accessToken, repositoryId, tasks);
+    return Array.isArray(rows) ? rows.map(normalizeIssueRow) : [];
+  }
+}
+
+async function fetchIssueRows(accessToken, repositoryId) {
+  return supabaseFetch(
+    `/rest/v1/issues?repository_id=eq.${encodeURIComponent(
+      repositoryId,
+    )}&select=${issueSelectColumns()}&order=created_at.asc`,
+    {
+      method: "GET",
+      accessToken,
+    },
+  );
+}
+
+async function insertIssueRows(accessToken, repositoryId, tasks) {
+  const payload = tasks.map((task) => {
+    const issue = {
+      repository_id: repositoryId,
+      title: task.title,
+      state: "open",
+      kanban_column: "Backlog",
+      story_point: task.storyPoint,
+      labels: [{ name: "claude-generated", description: task.description }],
+      source: "claude",
+      assignee_username: null,
+    };
+
+    if (issueDescriptionColumnAvailable) {
+      issue.description = task.description;
+    }
+
+    return issue;
+  });
+
+  return supabaseFetch(
+    `/rest/v1/issues?select=${issueSelectColumns()}`,
+    {
+      method: "POST",
+      accessToken,
+      headers: {
+        Prefer: "return=representation",
+      },
+      body: payload,
+    },
+  );
+}
+
+function issueSelectColumns() {
+  const baseColumns =
+    "id,repository_id,sprint_id,title,state,kanban_column,story_point,source,assignee_username,assignee_avatar_url,github_html_url,labels,created_at,updated_at";
+  return issueDescriptionColumnAvailable
+    ? `id,repository_id,sprint_id,title,description,state,kanban_column,story_point,source,assignee_username,assignee_avatar_url,github_html_url,labels,created_at,updated_at`
+    : baseColumns;
+}
+
+function normalizeIssueRow(row) {
+  const description =
+    row.description || getIssueDescriptionFromLabels(row.labels) || (row.source === "claude" ? row.title : "");
+
+  return {
+    ...row,
+    description,
+  };
+}
+
+async function getClaudeTasksForDisplay(repository, githubAccessToken) {
+  try {
+    const markdown = await fetchGithubFileContent(repository, "CLAUDE.md", githubAccessToken);
+    return extractTasksFromClaudeMarkdown(markdown);
+  } catch (error) {
+    return [];
+  }
+}
+
+function applyClaudeTaskDisplayTitles(issues, claudeTasks) {
+  const tasksByDetail = new Map(
+    claudeTasks.map((task) => [normalizeComparableTask(task.description), task]),
+  );
+  const fallbackItems = [];
+
+  const mappedIssues = issues.map((issue) => {
+    if (issue.source !== "claude") return issue;
+
+    const description = issue.description || issue.title;
+    const matchedTask = tasksByDetail.get(normalizeComparableTask(description));
+
+    if (matchedTask) {
+      return {
+        ...issue,
+        title: matchedTask.title,
+        description,
+        task_context: matchedTask.contextLabel,
+      };
+    }
+
+    const titleBase = makeContextTaskTitle("", description);
+    const mappedIssue = {
+      ...issue,
+      title: titleBase,
+      description,
+      task_context: getFallbackTaskContext(description),
+      titleBase,
+    };
+    fallbackItems.push(mappedIssue);
+    return mappedIssue;
+  });
+
+  const fallbackCounts = fallbackItems.reduce((counts, issue) => {
+    counts.set(issue.titleBase, (counts.get(issue.titleBase) || 0) + 1);
+    return counts;
+  }, new Map());
+  const fallbackIndexes = new Map();
+
+  return mappedIssues.map((issue) => {
+    if (!issue.titleBase) return issue;
+
+    const nextIndex = (fallbackIndexes.get(issue.titleBase) || 0) + 1;
+    fallbackIndexes.set(issue.titleBase, nextIndex);
+
+    const title =
+      fallbackCounts.get(issue.titleBase) > 1 ? `${issue.titleBase}${nextIndex}` : issue.titleBase;
+    const { titleBase, ...cleanIssue } = issue;
+    return {
+      ...cleanIssue,
+      title,
+    };
+  });
+}
+
+function getIssueDescriptionFromLabels(labels) {
+  if (!Array.isArray(labels)) return "";
+
+  const detailLabel = labels.find(
+    (label) => label && typeof label === "object" && typeof label.description === "string",
+  );
+  return detailLabel?.description || "";
+}
+
+function isMissingIssueDescriptionColumn(error) {
+  const text = `${error.message || ""} ${JSON.stringify(error.data || {})}`;
+  return text.includes("description") && text.includes("issues");
 }
 
 async function findRepositoryByGithubId(accessToken, githubRepoId) {
@@ -494,6 +747,46 @@ async function fetchGithubRepository(ownerName, repoName, githubAccessToken) {
   );
 }
 
+async function fetchGithubFileContent(repository, filePath, githubAccessToken) {
+  if (!githubAccessToken) {
+    throw apiError(
+      401,
+      "github_token_missing",
+      "GitHubファイルを取得できません。もう一度ログインしてください。",
+    );
+  }
+
+  const url = `https://api.github.com/repos/${encodeURIComponent(
+    repository.owner_name,
+  )}/${encodeURIComponent(repository.repo_name)}/contents/${encodeURIComponent(filePath)}`;
+  const headers = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "AgileLens",
+    "X-GitHub-Api-Version": "2022-11-28",
+    Authorization: `Bearer ${githubAccessToken}`,
+  };
+  const response = await fetch(url, { headers });
+  const data = await response.json().catch(() => null);
+
+  if (response.status === 404) {
+    throw apiError(404, "claude_not_found", "選択したリポジトリにCLAUDE.mdが見つかりません。");
+  }
+
+  if (!response.ok) {
+    throw apiError(
+      response.status === 401 || response.status === 403 ? response.status : 502,
+      "github_file_request_failed",
+      data?.message || "CLAUDE.mdの取得に失敗しました。",
+    );
+  }
+
+  if (!data?.content || data.encoding !== "base64") {
+    throw apiError(422, "claude_content_invalid", "CLAUDE.mdの内容を読み取れませんでした。");
+  }
+
+  return Buffer.from(data.content, "base64").toString("utf8");
+}
+
 async function githubFetch(url, githubAccessToken) {
   const headers = {
     Accept: "application/vnd.github+json",
@@ -530,6 +823,227 @@ async function githubFetch(url, githubAccessToken) {
     "github_request_failed",
     data?.message || "GitHub APIリクエストに失敗しました。",
   );
+}
+
+function extractTasksFromClaudeMarkdown(markdown) {
+  const withoutCodeBlocks = markdown.replace(/```[\s\S]*?```/g, "");
+  const tasks = [];
+  const seenDetails = new Set();
+  const headingStack = [];
+
+  withoutCodeBlocks.split(/\r?\n/).forEach((line) => {
+    const heading = parseMarkdownHeading(line);
+    if (heading) {
+      headingStack[heading.level - 1] = heading;
+      headingStack.length = heading.level;
+      return;
+    }
+
+    const task = parseMarkdownTaskLine(line, headingStack);
+    if (!task) return;
+
+    const comparableDetail = normalizeComparableTask(task.description);
+    if (seenDetails.has(comparableDetail)) return;
+
+    seenDetails.add(comparableDetail);
+    tasks.push(task);
+  });
+
+  return numberDuplicateTaskTitles(tasks.slice(0, 40));
+}
+
+function parseMarkdownHeading(line) {
+  const match = line.match(/^(#{1,6})\s+(.+)$/);
+  if (!match) return null;
+
+  return {
+    level: match[1].length,
+    title: normalizeHeadingTitle(match[2], { keepNumber: false }),
+    label: normalizeHeadingTitle(match[2], { keepNumber: true }),
+  };
+}
+
+function normalizeHeadingTitle(value, options = {}) {
+  const text = normalizeTaskDescription(value).replace(/^\d+(?:-\d+)*\.\s*/, "");
+  const numberedText = normalizeTaskDescription(value)
+    .replace(/^(\d+(?:-\d+)*)\.\s*/, "$1 ")
+    .replace(/^(\d+(?:-\d+)*)\s+(.+)$/, "$1 $2");
+  const sourceText = options.keepNumber ? numberedText : text;
+  const withoutParentheses = sourceText.replace(/[（(][^）)]+[）)]/g, "").trim();
+  const parenthesized = sourceText.match(/[（(]([^）)]+)[）)]/);
+
+  if (options.keepNumber) {
+    return withoutParentheses.replace(/画面$/, "");
+  }
+
+  if (parenthesized && (/^\/|^\[/.test(withoutParentheses) || withoutParentheses.length < 3)) {
+    return parenthesized[1].replace(/画面$/, "");
+  }
+
+  return withoutParentheses.replace(/画面$/, "");
+}
+
+function makeTaskContextLabel(contextHeadings) {
+  const preferredHeading =
+    contextHeadings.find((heading) => /^\d+\s+/.test(heading.label)) ||
+    contextHeadings[0] ||
+    contextHeadings[contextHeadings.length - 1];
+
+  if (!preferredHeading) return "CLAUDE";
+
+  return preferredHeading.label
+    .replace(/^(\d+(?:-\d+)*)\s+(.+)$/, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 18);
+}
+
+function getFallbackTaskContext(description) {
+  const rules = [
+    [/ログイン|サインイン|画面|UI|サイドバー|ヘッダー|ボード|アナリティクス/i, "1 画面一覧"],
+    [/テーブル|DB|RLS|index|UUID|updated_at|repositories|issues|sprints|users/i, "2 テーブル設計"],
+    [/同期|GitHub|Issue|タスク生成|CLAUDE\.md|ステータス/i, "3 処理フロー"],
+    [/PV|EV|AC|EVM|稼働時間|Story Point|単価|時給/i, "3 EVM算出"],
+    [/ロール|権限|オーナー|コラボレーター/i, "4 権限"],
+  ];
+  const matched = rules.find(([pattern]) => pattern.test(description));
+  return matched ? matched[1] : "CLAUDE";
+}
+
+function parseMarkdownTaskLine(line, headingStack) {
+  const match = line.match(/^\s*(?:[-*+]|\d+\.)\s+(?:\[[ xX]\]\s*)?(.+)$/);
+  if (!match) return null;
+
+  const description = normalizeTaskDescription(match[1]);
+  if (!isTaskCandidate(description)) return null;
+  const contextHeadings = headingStack.filter(Boolean).slice(-3);
+  const context = contextHeadings.map((heading) => heading.title).join(" ");
+  const contextLabel = makeTaskContextLabel(contextHeadings);
+
+  return {
+    titleBase: makeContextTaskTitle(context, description),
+    contextLabel,
+    description,
+    storyPoint: extractStoryPoint(match[1]),
+  };
+}
+
+function numberDuplicateTaskTitles(tasks) {
+  const counts = tasks.reduce((acc, task) => {
+    acc.set(task.titleBase, (acc.get(task.titleBase) || 0) + 1);
+    return acc;
+  }, new Map());
+  const indexes = new Map();
+
+  return tasks.map((task) => {
+    const nextIndex = (indexes.get(task.titleBase) || 0) + 1;
+    indexes.set(task.titleBase, nextIndex);
+
+    return {
+      ...task,
+      title: counts.get(task.titleBase) > 1 ? `${task.titleBase}${nextIndex}` : task.titleBase,
+    };
+  });
+}
+
+function normalizeTaskDescription(value) {
+  let description = String(value)
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  description = description.replace(/^[:：\-–—\s]+/, "").replace(/[。.\s]+$/, "");
+  return description.length > 600 ? `${description.slice(0, 597)}...` : description;
+}
+
+function makeContextTaskTitle(context, description) {
+  const detailRules = [
+    [/サイドバー/i, "サイドバー"],
+    [/ヘッダー/i, "ヘッダー"],
+    [/GitHub.*OAuth|OAuth.*GitHub|ログイン|サインイン/i, "ログイン"],
+    [/リポジトリ.*追加|追加.*リポジトリ|repository/i, "リポジトリ追加"],
+    [/CLAUDE\.md|定義ファイル|タスク.*生成|生成.*タスク/i, "タスク生成"],
+    [/手動.*追加|追加.*手動/i, "手動追加"],
+    [/ステータス.*同期|同期.*ステータス|ラベル.*更新|ラベル.*反映/i, "状態同期"],
+    [/ドラッグ|ドロップ|D&D/i, "D&D"],
+    [/カード/i, "カード"],
+    [/カンバン|ボード/i, "ボード"],
+    [/スプリント.*切り替え|切り替え.*スプリント|ドロップダウン/i, "スプリント選択"],
+    [/稼働時間|作業時間/i, "稼働入力"],
+    [/EVM.*グラフ|グラフ.*EVM|推移グラフ|Recharts/i, "EVMグラフ"],
+    [/サマリー|ベロシティ|予測完了/i, "サマリー"],
+    [/時給|ポイント単価|Story Point|story point|sp:/i, "単価設定"],
+    [/Milestone|マイルストーン/i, "マイルストーン"],
+    [/UUID|gen_random_uuid/i, "UUID"],
+    [/updated_at|更新日時|trigger/i, "更新日時"],
+    [/GitHub.*同期|同期.*GitHub|synced_at/i, "GitHub同期"],
+    [/labels|ラベル/i, "ラベル"],
+    [/source|manual|claude/i, "ソース"],
+    [/kanban_column|Backlog|In Progress|Done/i, "カンバン列"],
+    [/\bstate\b|open|closed/i, "状態"],
+    [/index|検索/i, "Index"],
+    [/RLS|auth\.uid|所有データ/i, "RLS"],
+    [/users|ユーザー管理|Supabase Auth/i, "ユーザー"],
+    [/repositories|連携リポジトリ/i, "リポジトリ"],
+    [/sprints|スプリント情報/i, "スプリント"],
+    [/issues|タスク情報|Issue/i, "Issue"],
+    [/evm_daily_snapshots|スナップショット/i, "EVM記録"],
+    [/PV|Planned Value/i, "PV"],
+    [/EV|Earned Value/i, "EV"],
+    [/AC|Actual Cost/i, "AC"],
+    [/Webhook|webhook|GitHub API/i, "GitHub連携"],
+    [/権限|ロール|Permission|アクセス|コラボレーター|オーナー/i, "権限"],
+  ];
+  const contextRules = [
+    [/共通レイアウト|Layout/i, "レイアウト"],
+    [/ログイン/i, "ログイン"],
+    [/アジャイルボード|board/i, "ボード"],
+    [/EVMアナリティクス|analytics/i, "EVM"],
+    [/テーブル|Database|Schema|DB/i, "DB"],
+    [/タスク生成|同期フロー/i, "タスク同期"],
+    [/EVM.*算出|アーンド/i, "EVM算出"],
+    [/ロール|Permissions/i, "権限"],
+  ];
+
+  const matched = detailRules.find(([pattern]) => pattern.test(description));
+  if (matched) return matched[1];
+
+  const contextMatched = contextRules.find(([pattern]) => pattern.test(context));
+  if (contextMatched) return contextMatched[1];
+
+  return compactTitle(description);
+}
+
+function compactTitle(value) {
+  return String(value)
+    .replace(/\b(?:する|します|できる|可能とする|対応する|実装する|作成する|追加する)$/g, "")
+    .replace(/[「」『』【】()[\]。、,.]/g, "")
+    .replace(/\s+/g, "")
+    .slice(0, 14);
+}
+
+function isTaskCandidate(title) {
+  if (!title || title.length < 6) return false;
+  if (/^(UUID|RLS|MVP|PV|EV|AC)\b/.test(title)) return false;
+  return /実装|作成|追加|配置|対応|同期|入力|表示|登録|読み込|生成|設計|確認|更新|管理|切り替え|可視化|算出|許可|有効/.test(
+    title,
+  );
+}
+
+function extractStoryPoint(value) {
+  const match = String(value).match(/\b(?:sp|story\s*point|point|pt)\s*[:=]?\s*(\d{1,2})\b/i);
+  if (!match) return 1;
+
+  const point = Number(match[1]);
+  return Number.isFinite(point) && point >= 0 ? Math.min(point, 13) : 1;
+}
+
+function normalizeComparableTask(value) {
+  return String(value).trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 function normalizeRepositoryInput(body) {
