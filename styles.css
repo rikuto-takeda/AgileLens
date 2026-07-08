@@ -191,22 +191,59 @@ button {
   text-align: center;
 }
 
+.repo-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 4px;
+  border-radius: 8px;
+  background: transparent;
+}
+
+.repo-row.active,
+.repo-row:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .repo-button {
+  min-width: 0;
   width: 100%;
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
-  padding: 8px;
+  padding: 8px 6px 8px 8px;
   background: transparent;
   color: rgba(255, 255, 255, 0.76);
   text-align: left;
 }
 
-.repo-button.active,
+.repo-row.active .repo-button,
 .repo-button:hover {
-  background: rgba(255, 255, 255, 0.1);
   color: white;
+}
+
+.repo-remove-button {
+  width: 28px;
+  min-height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.repo-remove-button:hover {
+  background: rgba(184, 77, 68, 0.18);
+  color: #ffb7b0;
+}
+
+.repo-remove-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .repo-icon {

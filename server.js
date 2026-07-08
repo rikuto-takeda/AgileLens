@@ -67,6 +67,12 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    const repositoryMatch = url.pathname.match(/^\/api\/repositories\/([^/]+)$/);
+    if (req.method === "DELETE" && repositoryMatch) {
+      await handleDeleteRepository(req, res, decodeURIComponent(repositoryMatch[1]));
+      return;
+    }
+
     const issuesMatch = url.pathname.match(/^\/api\/repositories\/([^/]+)\/issues$/);
     if (req.method === "GET" && issuesMatch) {
       await handleListIssues(req, res, decodeURIComponent(issuesMatch[1]));
@@ -236,6 +242,21 @@ async function handleListRepositories(req, res) {
     const { accessToken } = await getAuthenticatedContext(req, res);
     const repositories = await listRepositories(accessToken);
     sendJson(res, 200, { repositories });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleDeleteRepository(req, res, repositoryId) {
+  try {
+    const { accessToken } = await getAuthenticatedContext(req, res);
+    const repository = await getRepositoryById(accessToken, repositoryId);
+    await deleteRepository(accessToken, repositoryId);
+
+    sendJson(res, 200, {
+      repository,
+      detached_only: true,
+    });
   } catch (error) {
     handleApiError(req, res, error);
   }
@@ -549,6 +570,16 @@ async function listRepositories(accessToken) {
     },
   );
   return Array.isArray(rows) ? rows : [];
+}
+
+async function deleteRepository(accessToken, repositoryId) {
+  await supabaseFetch(`/rest/v1/repositories?id=eq.${encodeURIComponent(repositoryId)}`, {
+    method: "DELETE",
+    accessToken,
+    headers: {
+      Prefer: "return=minimal",
+    },
+  });
 }
 
 async function listIssues(accessToken, repositoryId) {

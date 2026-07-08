@@ -20,6 +20,7 @@ const state = {
   repoDialogOpen: false,
   repoSaveBusy: false,
   repoSaveError: null,
+  repoDeleteBusyId: null,
   githubRepoLoading: false,
   githubRepoLoadError: null,
   availableGithubRepos: [],
@@ -335,13 +336,22 @@ function renderSidebar() {
             : repositories
                 .map(
                   (repo) => `
-              <button class="repo-button ${repo.id === state.selectedRepoId ? "active" : ""}" data-repo-id="${repo.id}">
-                <span class="repo-icon">${escapeHtml(repo.repo_name.slice(0, 2).toUpperCase())}</span>
-                <span>
-                  <span class="repo-name">${escapeHtml(repo.repo_name)}</span>
-                  <span class="repo-owner">${escapeHtml(repo.owner_name)}</span>
-                </span>
-              </button>
+              <div class="repo-row ${repo.id === state.selectedRepoId ? "active" : ""}">
+                <button class="repo-button" data-repo-id="${repo.id}">
+                  <span class="repo-icon">${escapeHtml(repo.repo_name.slice(0, 2).toUpperCase())}</span>
+                  <span>
+                    <span class="repo-name">${escapeHtml(repo.repo_name)}</span>
+                    <span class="repo-owner">${escapeHtml(repo.owner_name)}</span>
+                  </span>
+                </button>
+                <button
+                  class="repo-remove-button"
+                  data-remove-repo-id="${repo.id}"
+                  aria-label="${escapeHtml(repo.full_name || `${repo.owner_name}/${repo.repo_name}`)} をAgileLensから削除"
+                  title="AgileLensから削除。GitHubリポジトリ本体は削除しません。"
+                  ${state.repoDeleteBusyId === repo.id ? "disabled" : ""}
+                >×</button>
+              </div>
             `,
                 )
                 .join("")
@@ -807,6 +817,12 @@ function bindDashboardEvents() {
     });
   }
 
+  document.querySelectorAll("[data-remove-repo-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await deleteRepositoryFromApp(button.dataset.removeRepoId);
+    });
+  });
+
   document.querySelectorAll("[data-action='open-repo-dialog']").forEach((button) => {
     button.addEventListener("click", async () => {
       state.repoDialogOpen = true;
@@ -1112,6 +1128,59 @@ async function createRepository() {
     state.repoSaveBusy = false;
     state.repoSaveError = error.message;
     render();
+  }
+}
+
+async function deleteRepositoryFromApp(repositoryId) {
+  const repository = repositories.find((item) => item.id === repositoryId);
+  if (!repository || state.repoDeleteBusyId) return;
+
+  const fullName = repository.full_name || `${repository.owner_name}/${repository.repo_name}`;
+  const confirmed = window.confirm(
+    `${fullName} をAgileLensから削除します。\nGitHubリポジトリ本体は削除されません。`,
+  );
+  if (!confirmed) return;
+
+  state.repoDeleteBusyId = repositoryId;
+  render();
+
+  try {
+    await apiRequest(`/api/repositories/${encodeURIComponent(repositoryId)}`, {
+      method: "DELETE",
+    });
+
+    repositories = repositories.filter((item) => item.id !== repositoryId);
+    issues = issues.filter((issue) => issue.repository_id !== repositoryId);
+    state.availableGithubRepos = state.availableGithubRepos.map((repo) =>
+      String(repo.id) === String(repository.github_repo_id) ? { ...repo, registered: false } : repo,
+    );
+
+    if (state.selectedRepoId === repositoryId) {
+      const nextRepo = repositories[0] || null;
+      state.selectedRepoId = nextRepo ? nextRepo.id : null;
+      state.selectedIssueId = null;
+      state.pointDialogOpen = false;
+      state.sidebarOpen = false;
+
+      if (nextRepo) {
+        ensureDefaultSprint(nextRepo.id);
+        state.repoDeleteBusyId = null;
+        window.location.hash = `/projects/${nextRepo.id}/${state.view}`;
+        await loadIssues(nextRepo.id);
+      } else {
+        state.repoDeleteBusyId = null;
+        window.location.hash = "/projects";
+      }
+    } else {
+      state.repoDeleteBusyId = null;
+    }
+
+    render();
+    showToast(`${fullName} をAgileLensから削除しました`);
+  } catch (error) {
+    state.repoDeleteBusyId = null;
+    render();
+    showToast(error.message);
   }
 }
 
