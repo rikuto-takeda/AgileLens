@@ -560,7 +560,7 @@ button {
 }
 
 .count-pill,
-.point-pill,
+.estimate-pill,
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -689,7 +689,7 @@ button {
   color: #4b5c6c;
 }
 
-.point-pill {
+.estimate-pill {
   background: var(--accent-soft);
   color: var(--accent-strong);
 }
@@ -708,10 +708,105 @@ button {
 .analytics-settings-row {
   min-width: 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   align-items: start;
   overflow-x: hidden;
+}
+
+.evm-control-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(340px, 0.9fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.evm-period-panel,
+.evm-hours-panel {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.evm-period-panel .panel-body {
+  display: grid;
+  gap: 8px;
+}
+
+.evm-period-table {
+  width: 100%;
+  min-width: 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.evm-period-table th,
+.evm-period-table td {
+  padding: 6px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: bottom;
+}
+
+.evm-period-table th {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.evm-period-table input {
+  width: 100%;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: white;
+  color: var(--text);
+}
+
+.evm-control-table th:nth-child(3),
+.evm-control-table td:nth-child(3) {
+  width: 72px;
+}
+
+.evm-hours-header {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.evm-hours-table {
+  width: max-content;
+  min-width: 100%;
+}
+
+.evm-hours-table td {
+  width: 132px;
+  min-width: 132px;
+  text-align: center;
+}
+
+.evm-date-row td {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.evm-time-row input {
+  text-align: right;
+}
+
+.evm-period-panel .primary-button,
+.evm-price-panel .primary-button {
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.table-empty {
+  color: var(--text-muted);
+  text-align: center;
 }
 
 .panel {
@@ -758,6 +853,10 @@ button {
   gap: 6px;
 }
 
+.compact-panel .wage-form-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+
 .compact-panel .field label {
   margin-bottom: 4px;
   font-size: 11px;
@@ -780,6 +879,10 @@ button {
   grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: end;
+}
+
+.wage-form-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
 }
 
 .field label {
@@ -1061,6 +1164,12 @@ button {
   stroke-width: 1;
 }
 
+.chart-y-label {
+  fill: #607080;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .line-pv {
   fill: none;
   stroke: var(--blue);
@@ -1244,6 +1353,10 @@ button {
     gap: 8px;
   }
 
+  .evm-control-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .compact-panel .panel-header {
     padding: 7px 8px;
   }
@@ -1259,6 +1372,14 @@ button {
   .compact-panel .form-row {
     grid-template-columns: minmax(0, 1fr) 18px 38px;
     gap: 4px;
+  }
+
+  .evm-price-panel .wage-form-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .evm-control-table {
+    min-width: 420px;
   }
 
   .compact-panel .field label {
@@ -1404,6 +1525,10 @@ button {
     gap: 3px;
   }
 
+  .compact-panel .wage-form-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .compact-panel .unit-label,
   .compact-panel .primary-button {
     font-size: 10px;
@@ -1450,7 +1575,7 @@ button {
     font-size: 9px;
   }
 
-  .point-pill,
+  .estimate-pill,
   .count-pill {
     min-height: 20px;
     padding: 0 6px;

@@ -28,12 +28,10 @@ CREATE TABLE public.repositories (
     owner_name TEXT NOT NULL,
     full_name TEXT GENERATED ALWAYS AS (owner_name || '/' || repo_name) STORED,
     hourly_wage INT DEFAULT 0 NOT NULL,
-    point_unit_price INT DEFAULT 0 NOT NULL,
     synced_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
-    CONSTRAINT repositories_hourly_wage_non_negative CHECK (hourly_wage >= 0),
-    CONSTRAINT repositories_point_unit_price_non_negative CHECK (point_unit_price >= 0)
+    CONSTRAINT repositories_hourly_wage_non_negative CHECK (hourly_wage >= 0)
 );
 
 CREATE TABLE public.sprints (
@@ -45,13 +43,11 @@ CREATE TABLE public.sprints (
     due_on DATE,
     cycle_days INT DEFAULT 14 NOT NULL,
     state TEXT DEFAULT 'open' NOT NULL,
-    total_story_points INT DEFAULT 0 NOT NULL,
     synced_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     CONSTRAINT sprints_state_check CHECK (state IN ('open', 'closed')),
     CONSTRAINT sprints_cycle_days_positive CHECK (cycle_days > 0),
-    CONSTRAINT sprints_total_story_points_non_negative CHECK (total_story_points >= 0),
     CONSTRAINT sprints_date_order CHECK (start_date IS NULL OR due_on IS NULL OR start_date <= due_on),
     UNIQUE (repository_id, github_milestone_id)
 );
@@ -65,7 +61,7 @@ CREATE TABLE public.issues (
     title TEXT NOT NULL,
     state TEXT DEFAULT 'open' NOT NULL,
     kanban_column TEXT DEFAULT 'Backlog' NOT NULL,
-    story_point INT DEFAULT 0 NOT NULL,
+    estimated_hours NUMERIC(6,2) DEFAULT 0.5 NOT NULL,
     labels JSONB DEFAULT '[]'::jsonb NOT NULL,
     source TEXT DEFAULT 'github' NOT NULL,
     assignee_username TEXT,
@@ -77,7 +73,7 @@ CREATE TABLE public.issues (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     CONSTRAINT issues_state_check CHECK (state IN ('open', 'closed')),
     CONSTRAINT issues_kanban_column_check CHECK (kanban_column IN ('Backlog', 'In Progress', 'Done')),
-    CONSTRAINT issues_story_point_non_negative CHECK (story_point >= 0),
+    CONSTRAINT issues_estimated_hours_non_negative CHECK (estimated_hours >= 0),
     CONSTRAINT issues_source_check CHECK (source IN ('github', 'manual', 'claude')),
     UNIQUE (repository_id, github_issue_id),
     UNIQUE (repository_id, github_issue_number)

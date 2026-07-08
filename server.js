@@ -14,6 +14,8 @@ const port = Number(process.env.PORT || 5173);
 const supabaseUrl = trimTrailingSlash(process.env.SUPABASE_URL || "");
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
 const githubScopes = process.env.GITHUB_OAUTH_SCOPES || "repo read:user user:email";
+const defaultEstimatedHours = 0.5;
+const manualEstimatedHoursLabel = "estimated-hours-manual";
 
 const cookies = {
   access: "agilelens_access",
@@ -70,6 +72,26 @@ const server = http.createServer(async (req, res) => {
     const repositoryMatch = url.pathname.match(/^\/api\/repositories\/([^/]+)$/);
     if (req.method === "DELETE" && repositoryMatch) {
       await handleDeleteRepository(req, res, decodeURIComponent(repositoryMatch[1]));
+      return;
+    }
+
+    const repositorySettingsMatch = url.pathname.match(/^\/api\/repositories\/([^/]+)\/settings$/);
+    if (req.method === "PATCH" && repositorySettingsMatch) {
+      await handleUpdateRepositorySettings(req, res, decodeURIComponent(repositorySettingsMatch[1]));
+      return;
+    }
+
+    const evmMatch = url.pathname.match(/^\/api\/repositories\/([^/]+)\/evm$/);
+    if (req.method === "GET" && evmMatch) {
+      await handleGetRepositoryEvm(req, res, decodeURIComponent(evmMatch[1]), url);
+      return;
+    }
+
+    const evmHoursMatch = url.pathname.match(
+      /^\/api\/repositories\/([^/]+)\/evm\/working-hours$/,
+    );
+    if (req.method === "POST" && evmHoursMatch) {
+      await handleSaveWorkingHours(req, res, decodeURIComponent(evmHoursMatch[1]), url);
       return;
     }
 
@@ -256,6 +278,110 @@ async function handleDeleteRepository(req, res, repositoryId) {
     sendJson(res, 200, {
       repository,
       detached_only: true,
+    });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleUpdateRepositorySettings(req, res, repositoryId) {
+  try {
+    const { accessToken } = await getAuthenticatedContext(req, res);
+    await getRepositoryById(accessToken, repositoryId);
+    const input = normalizeRepositorySettingsInput(await readJsonBody(req));
+    const repository = await updateRepositorySettings(accessToken, repositoryId, input);
+
+    sendJson(res, 200, { repository });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleGetRepositoryEvm(req, res, repositoryId, url) {
+  try {
+    const { accessToken } = await getAuthenticatedContext(req, res);
+    const repository = await getRepositoryById(accessToken, repositoryId);
+    const issues = await listIssues(accessToken, repositoryId);
+    const sprint = await ensureRepositoryEvmSprint(accessToken, repository);
+    let snapshots = await listEvmSnapshots(accessToken, sprint.id);
+    snapshots = await saveTodayEvmSnapshot(accessToken, sprint.id, repository, sprint, issues, snapshots);
+    const period = resolveEvmPeriod(repository, url.searchParams);
+    const evm = buildRepositoryEvm(repository, sprint, issues, snapshots, period);
+
+    sendJson(res, 200, {
+      repository,
+      sprint,
+      evm,
+    });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleSaveWorkingHours(req, res, repositoryId, url) {
+  try {
+    const { accessToken } = await getAuthenticatedContext(req, res);
+    const repository = await getRepositoryById(accessToken, repositoryId);
+    const issues = await listIssues(accessToken, repositoryId);
+    const sprint = await ensureRepositoryEvmSprint(accessToken, repository);
+    const input = normalizeWorkingHoursInput(await readJsonBody(req));
+    const hourlyWage = Number(repository.hourly_wage || 0);
+    let snapshots = await listEvmSnapshots(accessToken, sprint.id);
+    const changedSnapshots = [];
+
+    for (const entry of input.entries) {
+      const existingSnapshot = snapshots.find(
+        (snapshot) => snapshot.recorded_date === entry.recordedDate,
+      );
+      const values = calculateEvmValuesForDate(
+        repository,
+        sprint,
+        issues,
+        entry.recordedDate,
+      );
+      const dailyActualCost = calculateDailyActualCost({ daily_working_hours: entry.hours }, hourlyWage);
+      const snapshot = {
+        sprint_id: sprint.id,
+        recorded_date: entry.recordedDate,
+        planned_value: values.plannedValue,
+        earned_value: resolveEarnedValueForSnapshotWrite(
+          entry.recordedDate,
+          existingSnapshot,
+          values.earnedValue,
+          todayDate(),
+        ),
+        actual_cost: dailyActualCost,
+        daily_working_hours: entry.hours,
+      };
+
+      snapshots = mergeEvmSnapshot(snapshots, snapshot);
+      changedSnapshots.push(snapshot);
+    }
+
+    for (const snapshot of changedSnapshots) {
+      const actualCost = calculateCumulativeActualCost(
+        snapshots,
+        snapshot.recorded_date,
+        hourlyWage,
+      );
+      const savedSnapshot = await upsertEvmSnapshot(accessToken, sprint.id, {
+        recordedDate: snapshot.recorded_date,
+        plannedValue: snapshot.planned_value,
+        earnedValue: snapshot.earned_value,
+        actualCost,
+        dailyWorkingHours: snapshot.daily_working_hours,
+      });
+      snapshots = mergeEvmSnapshot(snapshots, savedSnapshot);
+    }
+
+    snapshots = await saveTodayEvmSnapshot(accessToken, sprint.id, repository, sprint, issues, snapshots);
+    const period = resolveEvmPeriod(repository, url.searchParams);
+    const evm = buildRepositoryEvm(repository, sprint, issues, snapshots, period);
+
+    sendJson(res, 200, {
+      repository,
+      sprint,
+      evm,
     });
   } catch (error) {
     handleApiError(req, res, error);
@@ -544,11 +670,74 @@ async function getPrivateUserProfile(accessToken, user) {
   return Array.isArray(rows) ? rows[0] : null;
 }
 
+function repositorySelectColumns({ includeEvmPeriod = true } = {}) {
+  const columns = [
+    "id",
+    "github_repo_id",
+    "repo_name",
+    "owner_name",
+    "full_name",
+    "hourly_wage",
+  ];
+
+  if (includeEvmPeriod) {
+    columns.push("evm_display_start_date", "evm_display_end_date");
+  }
+
+  columns.push("synced_at", "created_at");
+  return columns.join(",");
+}
+
+function normalizeRepositoryRow(repository) {
+  if (!repository) return repository;
+  return {
+    evm_display_start_date: null,
+    evm_display_end_date: null,
+    ...repository,
+  };
+}
+
+async function fetchRepositoryRows(pathForSelect, options = {}) {
+  try {
+    const rows = await supabaseFetch(pathForSelect(repositorySelectColumns()), options);
+    return Array.isArray(rows) ? rows.map(normalizeRepositoryRow) : rows;
+  } catch (error) {
+    if (!isMissingRepositoryEvmPeriodColumn(error)) throw error;
+
+    const rows = await supabaseFetch(
+      pathForSelect(repositorySelectColumns({ includeEvmPeriod: false })),
+      options,
+    );
+    return Array.isArray(rows) ? rows.map(normalizeRepositoryRow) : rows;
+  }
+}
+
+function isMissingRepositoryEvmPeriodColumn(error) {
+  const text = `${error.message || ""} ${JSON.stringify(error.data || {})}`;
+  return /evm_display_(start|end)_date/.test(text);
+}
+
+function hasEvmPeriodSettings(input) {
+  return (
+    Object.prototype.hasOwnProperty.call(input, "evm_display_start_date") ||
+    Object.prototype.hasOwnProperty.call(input, "evm_display_end_date")
+  );
+}
+
+function missingEvmPeriodColumnsError() {
+  return apiError(
+    500,
+    "evm_period_columns_missing",
+    "EVM表示期間を保存するDBカラムがありません。Supabaseのマイグレーションを適用してください。",
+  );
+}
+
 async function getRepositoryById(accessToken, repositoryId) {
-  const rows = await supabaseFetch(
-    `/rest/v1/repositories?id=eq.${encodeURIComponent(
-      repositoryId,
-    )}&select=id,github_repo_id,repo_name,owner_name,full_name,hourly_wage,point_unit_price,synced_at,created_at&limit=1`,
+  const rows = await fetchRepositoryRows(
+    (select) =>
+      `/rest/v1/repositories?id=eq.${encodeURIComponent(
+        repositoryId,
+      )}&select=${select}&limit=1`,
     {
       method: "GET",
       accessToken,
@@ -562,8 +751,8 @@ async function getRepositoryById(accessToken, repositoryId) {
 }
 
 async function listRepositories(accessToken) {
-  const rows = await supabaseFetch(
-    "/rest/v1/repositories?select=id,github_repo_id,repo_name,owner_name,full_name,hourly_wage,point_unit_price,synced_at,created_at&order=created_at.asc",
+  const rows = await fetchRepositoryRows(
+    (select) => `/rest/v1/repositories?select=${select}&order=created_at.asc`,
     {
       method: "GET",
       accessToken,
@@ -580,6 +769,411 @@ async function deleteRepository(accessToken, repositoryId) {
       Prefer: "return=minimal",
     },
   });
+}
+
+async function updateRepositorySettings(accessToken, repositoryId, input) {
+  const pathForSelect = (select) =>
+    `/rest/v1/repositories?id=eq.${encodeURIComponent(repositoryId)}&select=${select}`;
+  const options = {
+    method: "PATCH",
+    accessToken,
+    headers: {
+      Prefer: "return=representation",
+    },
+    body: input,
+  };
+  let rows;
+  try {
+    rows = await supabaseFetch(pathForSelect(repositorySelectColumns()), options);
+  } catch (error) {
+    if (!isMissingRepositoryEvmPeriodColumn(error)) throw error;
+    if (hasEvmPeriodSettings(input)) throw missingEvmPeriodColumnsError();
+    rows = await supabaseFetch(
+      pathForSelect(repositorySelectColumns({ includeEvmPeriod: false })),
+      options,
+    );
+  }
+  const repository = Array.isArray(rows) ? rows[0] : rows;
+  if (!repository) {
+    throw apiError(404, "repository_not_found", "リポジトリが見つかりません。");
+  }
+  return normalizeRepositoryRow(repository);
+}
+
+async function ensureRepositoryEvmSprint(accessToken, repository) {
+  const existing = await listRepositorySprints(accessToken, repository.id);
+  if (existing.length > 0) {
+    return existing[0];
+  }
+
+  const startDate = dateOnly(repository.created_at) || todayDate();
+  const rows = await supabaseFetch(
+    `/rest/v1/sprints?select=${sprintSelectColumns()}`,
+    {
+      method: "POST",
+      accessToken,
+      headers: {
+        Prefer: "return=representation",
+      },
+      body: {
+        repository_id: repository.id,
+        title: "MVP EVM",
+        start_date: startDate,
+        due_on: addDays(startDate, 13),
+        cycle_days: 14,
+        state: "open",
+      },
+    },
+  );
+
+  return Array.isArray(rows) ? rows[0] : rows;
+}
+
+async function listRepositorySprints(accessToken, repositoryId) {
+  const rows = await supabaseFetch(
+    `/rest/v1/sprints?repository_id=eq.${encodeURIComponent(
+      repositoryId,
+    )}&select=${sprintSelectColumns()}&order=created_at.asc`,
+    {
+      method: "GET",
+      accessToken,
+    },
+  );
+  return Array.isArray(rows) ? rows : [];
+}
+
+function sprintSelectColumns() {
+  return "id,repository_id,github_milestone_id,title,start_date,due_on,cycle_days,state,synced_at,created_at,updated_at";
+}
+
+async function listEvmSnapshots(accessToken, sprintId) {
+  const rows = await supabaseFetch(
+    `/rest/v1/evm_daily_snapshots?sprint_id=eq.${encodeURIComponent(
+      sprintId,
+    )}&select=id,sprint_id,recorded_date,planned_value,earned_value,actual_cost,daily_working_hours,created_at,updated_at&order=recorded_date.asc`,
+    {
+      method: "GET",
+      accessToken,
+    },
+  );
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function upsertEvmSnapshot(accessToken, sprintId, input) {
+  const rows = await supabaseFetch(
+    "/rest/v1/evm_daily_snapshots?on_conflict=sprint_id,recorded_date&select=id,sprint_id,recorded_date,planned_value,earned_value,actual_cost,daily_working_hours,created_at,updated_at",
+    {
+      method: "POST",
+      accessToken,
+      headers: {
+        Prefer: "resolution=merge-duplicates,return=representation",
+      },
+      body: {
+        sprint_id: sprintId,
+        recorded_date: input.recordedDate,
+        planned_value: input.plannedValue,
+        earned_value: input.earnedValue,
+        actual_cost: input.actualCost,
+        daily_working_hours: input.dailyWorkingHours,
+      },
+    },
+  );
+  return Array.isArray(rows) ? rows[0] : rows;
+}
+
+function buildRepositoryEvm(repository, sprint, issues, snapshots, period = {}) {
+  const startDate = sprint.start_date || dateOnly(repository.created_at) || todayDate();
+  const cycleDays = normalizePositiveInteger(sprint.cycle_days, 14);
+  const dueDate = sprint.due_on || addDays(startDate, cycleDays - 1);
+  const today = todayDate();
+  const autoLatestDate = maxDate([
+    today,
+    dueDate,
+    ...snapshots.map((snapshot) => snapshot.recorded_date),
+    ...issues.map((issue) => dateOnly(issue.closed_at || issue.updated_at || issue.created_at)),
+  ]);
+  const latestDate = period.endDate || autoLatestDate;
+  const rangeStart = period.startDate || clampRangeStart(startDate, latestDate, 60);
+  const plannedStartDate = rangeStart;
+  const plannedEndDate = latestDate;
+  const totalEstimatedHours = sumEstimatedHours(issues);
+  const completedEstimatedHours = sumEstimatedHours(issues.filter(isDoneIssue));
+  const progressEstimatedHours = sumProgressEstimatedHours(issues);
+  const progressRate = calculateOverallProgressRate(issues);
+  const hourlyWage = Number(repository.hourly_wage || 0);
+  const bac = Math.round(totalEstimatedHours * hourlyWage);
+  const snapshotMap = new Map(snapshots.map((snapshot) => [snapshot.recorded_date, snapshot]));
+  let cumulativeActualCost = snapshots
+    .filter((snapshot) => snapshot.recorded_date < rangeStart)
+    .reduce(
+      (total, snapshot) => total + calculateDailyActualCost(snapshot, hourlyWage),
+      0,
+    );
+
+  const series = enumerateDates(rangeStart, latestDate).map((date) => {
+    const snapshot = snapshotMap.get(date);
+    const values = calculateEvmValuesForDate(repository, sprint, issues, date, {
+      plannedStartDate,
+      plannedEndDate,
+    });
+    const dailyWorkingHours = Number(snapshot?.daily_working_hours || 0);
+    const dailyActualCost = calculateDailyActualCost(snapshot, hourlyWage);
+    const previousActualCost = cumulativeActualCost;
+    const actualCost = previousActualCost + dailyActualCost;
+    cumulativeActualCost = actualCost;
+
+    return {
+      date,
+      day: formatEvmDayLabel(date),
+      pv: values.plannedValue,
+      ev: resolveEarnedValueForDate(date, snapshot, values.earnedValue, today),
+      ac: actualCost,
+      previous_actual_cost: previousActualCost,
+      completed_estimated_hours: sumCompletedEstimatedHoursForDate(issues, date),
+      daily_working_hours: dailyWorkingHours,
+      daily_actual_cost: dailyActualCost,
+    };
+  });
+
+  const latest = series[series.length - 1] || {
+    date: today,
+    pv: 0,
+    ev: 0,
+    ac: 0,
+    daily_working_hours: 0,
+    daily_actual_cost: 0,
+  };
+  const summaryPoint =
+    series.find((point) => point.date === today) ||
+    series.slice().reverse().find((point) => point.date <= today) ||
+    latest;
+  const todaySnapshot = snapshotMap.get(today);
+
+  return {
+    series,
+    summary: {
+      total_estimated_hours: totalEstimatedHours,
+      completed_estimated_hours: completedEstimatedHours,
+      progress_estimated_hours: progressEstimatedHours,
+      progress_rate: progressRate,
+      bac,
+      total_budget: bac,
+      planned_value: summaryPoint.pv,
+      earned_value: summaryPoint.ev,
+      actual_cost: summaryPoint.ac,
+      schedule_variance: summaryPoint.ev - summaryPoint.pv,
+      cost_variance: summaryPoint.ev - summaryPoint.ac,
+      spi: summaryPoint.pv === 0 ? 0 : summaryPoint.ev / summaryPoint.pv,
+      cpi: summaryPoint.ac === 0 ? 0 : summaryPoint.ev / summaryPoint.ac,
+      hourly_wage: hourlyWage,
+      start_date: startDate,
+      due_on: dueDate,
+      display_start_date: rangeStart,
+      display_end_date: latestDate,
+    },
+    today: {
+      recorded_date: today,
+      daily_working_hours: Number(todaySnapshot?.daily_working_hours || 0),
+      actual_cost: calculateDailyActualCost(todaySnapshot, hourlyWage),
+    },
+  };
+}
+
+function calculateEvmValuesForDate(repository, sprint, issues, date, options = {}) {
+  const startDate = options.plannedStartDate || sprint.start_date || dateOnly(repository.created_at) || todayDate();
+  const cycleDays = normalizePositiveInteger(sprint.cycle_days, 14);
+  const dueDate = sprint.due_on || addDays(startDate, cycleDays - 1);
+  const plannedEndDate = options.plannedEndDate || dueDate;
+  const plannedDurationDays = Math.max(0, daysBetween(startDate, plannedEndDate));
+  const totalEstimatedHours = sumEstimatedHours(issues);
+  const hourlyWage = Number(repository.hourly_wage || 0);
+  const bac = Math.round(totalEstimatedHours * hourlyWage);
+  const elapsedDays = Math.max(0, Math.min(daysBetween(startDate, date), plannedDurationDays));
+  const progressRate = calculateOverallProgressRate(issues);
+
+  return {
+    plannedValue: plannedDurationDays === 0 ? bac : Math.round(bac * (elapsedDays / plannedDurationDays)),
+    earnedValue: Math.round(bac * progressRate),
+    progressRate,
+  };
+}
+
+function mergeEvmSnapshot(snapshots, snapshot) {
+  const index = snapshots.findIndex((item) => item.recorded_date === snapshot.recorded_date);
+  if (index === -1) return [...snapshots, snapshot];
+
+  const nextSnapshots = snapshots.slice();
+  nextSnapshots[index] = {
+    ...nextSnapshots[index],
+    ...snapshot,
+  };
+  return nextSnapshots;
+}
+
+async function saveTodayEvmSnapshot(accessToken, sprintId, repository, sprint, issues, snapshots) {
+  const today = todayDate();
+  const hourlyWage = Number(repository.hourly_wage || 0);
+  const existingSnapshot = snapshots.find((snapshot) => snapshot.recorded_date === today);
+  const dailyWorkingHours = Number(existingSnapshot?.daily_working_hours || 0);
+  const values = calculateEvmValuesForDate(repository, sprint, issues, today);
+  const nextSnapshot = {
+    sprint_id: sprintId,
+    recorded_date: today,
+    planned_value: values.plannedValue,
+    earned_value: values.earnedValue,
+    actual_cost: calculateDailyActualCost({ daily_working_hours: dailyWorkingHours }, hourlyWage),
+    daily_working_hours: dailyWorkingHours,
+  };
+  const snapshotsWithToday = mergeEvmSnapshot(snapshots, nextSnapshot);
+  const actualCost = calculateCumulativeActualCost(snapshotsWithToday, today, hourlyWage);
+  const savedSnapshot = await upsertEvmSnapshot(accessToken, sprintId, {
+    recordedDate: today,
+    plannedValue: nextSnapshot.planned_value,
+    earnedValue: nextSnapshot.earned_value,
+    actualCost,
+    dailyWorkingHours,
+  });
+
+  return mergeEvmSnapshot(snapshots, savedSnapshot);
+}
+
+function calculateCumulativeActualCost(snapshots, recordedDate, hourlyWage) {
+  return calculatePreviousActualCost(snapshots, recordedDate, hourlyWage)
+    + calculateDailyActualCost(snapshots.find((snapshot) => snapshot.recorded_date === recordedDate), hourlyWage);
+}
+
+function calculatePreviousActualCost(snapshots, recordedDate, hourlyWage) {
+  return snapshots
+    .filter((snapshot) => snapshot.recorded_date <= recordedDate)
+    .reduce(
+      (total, snapshot) => {
+        if (snapshot.recorded_date === recordedDate) return total;
+        return total + calculateDailyActualCost(snapshot, hourlyWage);
+      },
+      0,
+    );
+}
+
+function calculateDailyActualCost(snapshot, hourlyWage) {
+  return Math.round(Number(snapshot?.daily_working_hours || 0) * hourlyWage);
+}
+
+function resolveEarnedValueForDate(date, snapshot, currentEarnedValue, today) {
+  if (date >= today) return currentEarnedValue;
+  if (snapshot && !isBackfilledEvmSnapshot(date, snapshot)) {
+    return Math.round(Number(snapshot.earned_value || 0));
+  }
+  return 0;
+}
+
+function resolveEarnedValueForSnapshotWrite(date, snapshot, currentEarnedValue, today) {
+  if (date === today) return currentEarnedValue;
+  if (snapshot && !isBackfilledEvmSnapshot(date, snapshot)) {
+    return Math.round(Number(snapshot.earned_value || 0));
+  }
+  return 0;
+}
+
+function isBackfilledEvmSnapshot(date, snapshot) {
+  const createdDate = dateOnly(snapshot.created_at);
+  return Boolean(createdDate && date < createdDate);
+}
+
+function isDoneIssue(issue) {
+  return issue.kanban_column === "Done" || issue.state === "closed";
+}
+
+function sumCompletedEstimatedHoursForDate(issues, date) {
+  return issues.reduce((total, issue) => {
+    if (!isDoneIssue(issue)) return total;
+    const completedDate = dateOnly(issue.closed_at || issue.synced_at || issue.updated_at || issue.created_at);
+    if (completedDate && completedDate > date) return total;
+    return total + normalizeNonNegativeNumber(issue.estimated_hours);
+  }, 0);
+}
+
+function sumEstimatedHours(issues) {
+  return issues.reduce((total, issue) => total + normalizeNonNegativeNumber(issue.estimated_hours), 0);
+}
+
+function sumProgressEstimatedHours(issues) {
+  return issues.reduce(
+    (total, issue) => total + normalizeNonNegativeNumber(issue.estimated_hours) * issueProgressRate(issue),
+    0,
+  );
+}
+
+function calculateOverallProgressRate(issues) {
+  const totalEstimatedHours = sumEstimatedHours(issues);
+  if (totalEstimatedHours === 0) return 0;
+  return sumProgressEstimatedHours(issues) / totalEstimatedHours;
+}
+
+function issueProgressRate(issue) {
+  if (issue.kanban_column === "Done") return 1;
+  if (issue.kanban_column === "In Progress") return 0.5;
+  return 0;
+}
+
+function normalizeNonNegativeNumber(value) {
+  const numberValue = Number(value || 0);
+  return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : 0;
+}
+
+function normalizePositiveInteger(value, fallbackValue) {
+  const numberValue = Number(value);
+  return Number.isInteger(numberValue) && numberValue > 0 ? numberValue : fallbackValue;
+}
+
+function enumerateDates(startDate, endDate) {
+  const dates = [];
+  let cursor = startDate;
+  while (cursor <= endDate && dates.length < 90) {
+    dates.push(cursor);
+    cursor = addDays(cursor, 1);
+  }
+  return dates;
+}
+
+function clampRangeStart(startDate, endDate, maxDays) {
+  const minimumStart = addDays(endDate, -(maxDays - 1));
+  return startDate < minimumStart ? minimumStart : startDate;
+}
+
+function maxDate(values) {
+  return values.filter(Boolean).reduce((max, value) => (value > max ? value : max), todayDate());
+}
+
+function daysBetween(startDate, endDate) {
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+  return Math.floor((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function addDays(dateText, days) {
+  const date = new Date(`${dateText}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function dateOnly(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(value)) ? String(value) : "";
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function todayDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function formatEvmDayLabel(dateText) {
+  const date = new Date(`${dateText}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return dateText;
+  return `${date.getUTCMonth() + 1}/${date.getUTCDate()}`;
 }
 
 async function listIssues(accessToken, repositoryId) {
@@ -631,7 +1225,7 @@ async function insertIssueRows(accessToken, repositoryId, tasks) {
       title: task.title,
       state: "open",
       kanban_column: "Backlog",
-      story_point: task.storyPoint,
+      estimated_hours: task.estimatedHours,
       labels: [{ name: "claude-generated", description: task.description }],
       source: "claude",
       assignee_username: null,
@@ -678,7 +1272,7 @@ async function insertManualIssueRow(accessToken, repositoryId, input) {
     title: input.title,
     state: "open",
     kanban_column: input.kanbanColumn,
-    story_point: input.storyPoint,
+    estimated_hours: input.estimatedHours,
     labels: [{ name: "manual-task" }],
     source: "manual",
     assignee_username: input.assigneeUsername,
@@ -730,8 +1324,12 @@ async function updateIssueRow(accessToken, repositoryId, issueId, input) {
     payload.closed_at = input.kanbanColumn === "Done" ? new Date().toISOString() : null;
   }
 
-  if (input.storyPoint !== undefined) {
-    payload.story_point = input.storyPoint;
+  if (input.estimatedHours !== undefined) {
+    payload.estimated_hours = input.estimatedHours;
+    payload.labels = upsertIssueLabel(
+      await getIssueLabels(accessToken, repositoryId, issueId),
+      { name: manualEstimatedHoursLabel },
+    );
   }
 
   return supabaseFetch(
@@ -747,6 +1345,20 @@ async function updateIssueRow(accessToken, repositoryId, issueId, input) {
       body: payload,
     },
   );
+}
+
+async function getIssueLabels(accessToken, repositoryId, issueId) {
+  const rows = await supabaseFetch(
+    `/rest/v1/issues?id=eq.${encodeURIComponent(issueId)}&repository_id=eq.${encodeURIComponent(
+      repositoryId,
+    )}&select=labels&limit=1`,
+    {
+      method: "GET",
+      accessToken,
+    },
+  );
+  const issue = Array.isArray(rows) ? rows[0] : rows;
+  return Array.isArray(issue?.labels) ? issue.labels : [];
 }
 
 async function syncIssuesProgressFromGithub(accessToken, repository, issues, githubAccessToken) {
@@ -1236,8 +1848,8 @@ function makeProgressCodePhrases(issue, normalizedSource) {
       ],
     },
     {
-      patterns: [/story\s*point|storypoint|ポイント|sp:/],
-      phrases: ["storypoint", "story_point", "pointpill", "pointfield", "savepoint"],
+      patterns: [/見積|工数|作業時間|estimated\s*hours/i],
+      phrases: ["estimatedhours", "estimatepill", "estimatefield", "saveestimate"],
     },
     {
       patterns: [/ラベル|label/],
@@ -1248,7 +1860,7 @@ function makeProgressCodePhrases(issue, normalizedSource) {
       phrases: ["sprint", "rendersprintselect", "sprintsettings", "milestone", "selectedsprintid"],
     },
     {
-      patterns: [/evm|pv|ev|ac|稼働|時給|単価/],
+      patterns: [/evm|pv|ev|ac|稼働|時給|見積/],
       phrases: [
         "renderanalytics",
         "evmdata",
@@ -1323,8 +1935,8 @@ function makeProgressPhrases(issue, normalizedSource) {
       phrases: ["アジャイルボード", "カンバン", "board", "kanban"],
     },
     {
-      patterns: [/evm|pv|ev|ac|稼働|時給|単価/],
-      phrases: ["evm", "pv", "ev", "ac", "稼働時間", "時給", "単価"],
+      patterns: [/evm|pv|ev|ac|稼働|時給|見積/],
+      phrases: ["evm", "pv", "ev", "ac", "稼働時間", "時給", "見積時間"],
     },
   ];
 
@@ -1389,7 +2001,8 @@ function extractProgressTerms(normalizedSource) {
     ["選択", 2],
     ["保存", 2],
     ["issue", 2],
-    ["storypoint", 3],
+    ["estimatedhours", 3],
+    ["見積", 3],
     ["スプリント", 4],
     ["マイルストーン", 4],
     ["ラベル", 3],
@@ -1398,7 +2011,6 @@ function extractProgressTerms(normalizedSource) {
     ["ac", 3],
     ["稼働", 3],
     ["時給", 3],
-    ["単価", 3],
     ["権限", 4],
     ["rls", 4],
     ["db", 3],
@@ -1472,19 +2084,24 @@ async function updateRepositorySyncedAt(accessToken, repositoryId, syncedAt) {
 
 function issueSelectColumns() {
   const baseColumns =
-    "id,repository_id,sprint_id,github_issue_id,github_issue_number,title,state,kanban_column,story_point,source,assignee_username,assignee_avatar_url,github_html_url,labels,closed_at,synced_at,created_at,updated_at";
+    "id,repository_id,sprint_id,github_issue_id,github_issue_number,title,state,kanban_column,estimated_hours,source,assignee_username,assignee_avatar_url,github_html_url,labels,closed_at,synced_at,created_at,updated_at";
   return issueDescriptionColumnAvailable
-    ? `id,repository_id,sprint_id,github_issue_id,github_issue_number,title,description,state,kanban_column,story_point,source,assignee_username,assignee_avatar_url,github_html_url,labels,closed_at,synced_at,created_at,updated_at`
+    ? `id,repository_id,sprint_id,github_issue_id,github_issue_number,title,description,state,kanban_column,estimated_hours,source,assignee_username,assignee_avatar_url,github_html_url,labels,closed_at,synced_at,created_at,updated_at`
     : baseColumns;
 }
 
 function normalizeIssueRow(row) {
   const description =
     row.description || getIssueDescriptionFromLabels(row.labels) || (row.source === "claude" ? row.title : "");
+  const estimatedHours = normalizeEstimatedHours(row.estimated_hours, { defaultValue: defaultEstimatedHours });
 
   return {
     ...row,
     description,
+    estimated_hours:
+      row.source === "claude" && !hasIssueLabel(row.labels, manualEstimatedHoursLabel)
+        ? defaultEstimatedHours
+        : estimatedHours,
   };
 }
 
@@ -1561,16 +2178,27 @@ function getIssueDescriptionFromLabels(labels) {
   return detailLabel?.description || "";
 }
 
+function hasIssueLabel(labels, name) {
+  return Array.isArray(labels) && labels.some((label) => label?.name === name);
+}
+
+function upsertIssueLabel(labels, nextLabel) {
+  const safeLabels = Array.isArray(labels) ? labels.filter((label) => label && typeof label === "object") : [];
+  if (hasIssueLabel(safeLabels, nextLabel.name)) return safeLabels;
+  return [...safeLabels, nextLabel];
+}
+
 function isMissingIssueDescriptionColumn(error) {
   const text = `${error.message || ""} ${JSON.stringify(error.data || {})}`;
   return text.includes("description") && text.includes("issues");
 }
 
 async function findRepositoryByGithubId(accessToken, githubRepoId) {
-  const rows = await supabaseFetch(
-    `/rest/v1/repositories?github_repo_id=eq.${encodeURIComponent(
-      String(githubRepoId),
-    )}&select=id,github_repo_id,repo_name,owner_name,full_name,hourly_wage,point_unit_price,synced_at,created_at&limit=1`,
+  const rows = await fetchRepositoryRows(
+    (select) =>
+      `/rest/v1/repositories?github_repo_id=eq.${encodeURIComponent(
+        String(githubRepoId),
+      )}&select=${select}&limit=1`,
     {
       method: "GET",
       accessToken,
@@ -1586,13 +2214,12 @@ async function createRepository(accessToken, user, githubRepo, input) {
     repo_name: githubRepo.name,
     owner_name: githubRepo.owner.login,
     hourly_wage: 0,
-    point_unit_price: 0,
     synced_at: new Date().toISOString(),
   };
 
   try {
     const rows = await supabaseFetch(
-      "/rest/v1/repositories?select=id,github_repo_id,repo_name,owner_name,full_name,hourly_wage,point_unit_price,synced_at,created_at",
+      `/rest/v1/repositories?select=${repositorySelectColumns()}`,
       {
         method: "POST",
         accessToken,
@@ -1602,10 +2229,24 @@ async function createRepository(accessToken, user, githubRepo, input) {
         body: payload,
       },
     );
-    return Array.isArray(rows) ? rows[0] : rows;
+    return normalizeRepositoryRow(Array.isArray(rows) ? rows[0] : rows);
   } catch (error) {
     if (error.status === 409) {
       throw apiError(409, "repository_already_registered", "このリポジトリは既に登録されています。");
+    }
+    if (isMissingRepositoryEvmPeriodColumn(error)) {
+      const rows = await supabaseFetch(
+        `/rest/v1/repositories?select=${repositorySelectColumns({ includeEvmPeriod: false })}`,
+        {
+          method: "POST",
+          accessToken,
+          headers: {
+            Prefer: "return=representation",
+          },
+          body: payload,
+        },
+      );
+      return normalizeRepositoryRow(Array.isArray(rows) ? rows[0] : rows);
     }
     throw error;
   }
@@ -1824,7 +2465,7 @@ function getFallbackTaskContext(description) {
     [/ログイン|サインイン|画面|UI|サイドバー|ヘッダー|ボード|アナリティクス/i, "1 画面一覧"],
     [/テーブル|DB|RLS|index|UUID|updated_at|repositories|issues|sprints|users/i, "2 テーブル設計"],
     [/同期|GitHub|Issue|タスク生成|CLAUDE\.md|ステータス/i, "3 処理フロー"],
-    [/PV|EV|AC|EVM|稼働時間|Story Point|単価|時給/i, "3 EVM算出"],
+    [/PV|EV|AC|EVM|稼働時間|見積時間|作業時間|時給/i, "3 EVM算出"],
     [/ロール|権限|オーナー|コラボレーター/i, "4 権限"],
   ];
   const matched = rules.find(([pattern]) => pattern.test(description));
@@ -1845,7 +2486,7 @@ function parseMarkdownTaskLine(line, headingStack) {
     titleBase: makeContextTaskTitle(context, description),
     contextLabel,
     description,
-    storyPoint: extractStoryPoint(match[1]),
+    estimatedHours: estimateTaskHours(description, context),
   };
 }
 
@@ -1897,7 +2538,7 @@ function makeContextTaskTitle(context, description) {
     [/稼働時間|作業時間/i, "稼働入力"],
     [/EVM.*グラフ|グラフ.*EVM|推移グラフ|Recharts/i, "EVMグラフ"],
     [/サマリー|ベロシティ|予測完了/i, "サマリー"],
-    [/時給|ポイント単価|Story Point|story point|sp:/i, "単価設定"],
+    [/時給|見積時間|工数|作業時間/i, "工数設定"],
     [/Milestone|マイルストーン/i, "マイルストーン"],
     [/UUID|gen_random_uuid/i, "UUID"],
     [/updated_at|更新日時|trigger/i, "更新日時"],
@@ -1955,12 +2596,8 @@ function isTaskCandidate(title) {
   );
 }
 
-function extractStoryPoint(value) {
-  const match = String(value).match(/\b(?:sp|story\s*point|point|pt)\s*[:=]?\s*(\d{1,2})\b/i);
-  if (!match) return 1;
-
-  const point = Number(match[1]);
-  return Number.isFinite(point) && point >= 0 ? Math.min(point, 13) : 1;
+function estimateTaskHours(description, context = "") {
+  return defaultEstimatedHours;
 }
 
 function normalizeComparableTask(value) {
@@ -2000,6 +2637,129 @@ function normalizeRepositoryInput(body) {
   };
 }
 
+function normalizeRepositorySettingsInput(body) {
+  const input = {};
+
+  if (body.hourly_wage !== undefined) {
+    input.hourly_wage = normalizeMoneyInput(body.hourly_wage, "時給");
+  }
+
+  const hasStartDate = body.evm_display_start_date !== undefined;
+  const hasEndDate = body.evm_display_end_date !== undefined;
+  if (hasStartDate || hasEndDate) {
+    const startDate = stringValue(body.evm_display_start_date).trim();
+    const endDate = stringValue(body.evm_display_end_date).trim();
+
+    validateEvmPeriodDates(startDate, endDate);
+    input.evm_display_start_date = startDate;
+    input.evm_display_end_date = endDate;
+  }
+
+  if (Object.keys(input).length === 0) {
+    throw apiError(400, "empty_repository_settings", "更新する設定がありません。");
+  }
+
+  return input;
+}
+
+function normalizeWorkingHoursInput(body) {
+  const rawEntries = Array.isArray(body.entries)
+    ? body.entries
+    : [
+        {
+          recorded_date: body.recorded_date,
+          hours: body.hours ?? body.daily_working_hours,
+        },
+      ];
+
+  if (rawEntries.length === 0 || rawEntries.length > 90) {
+    throw apiError(400, "invalid_working_hours_entries", "稼働時間は1日以上90日以内で保存してください。");
+  }
+
+  const entriesByDate = new Map();
+  rawEntries.forEach((entry) => {
+    const normalizedEntry = normalizeWorkingHoursEntry(entry);
+    entriesByDate.set(normalizedEntry.recordedDate, normalizedEntry);
+  });
+
+  return {
+    entries: Array.from(entriesByDate.values()).sort((a, b) =>
+      a.recordedDate.localeCompare(b.recordedDate),
+    ),
+  };
+}
+
+function normalizeWorkingHoursEntry(entry) {
+  const hours = Number(entry.hours ?? entry.daily_working_hours);
+  if (!Number.isFinite(hours) || hours < 0 || hours > 24) {
+    throw apiError(400, "invalid_working_hours", "稼働時間は0以上24以下で入力してください。");
+  }
+
+  const recordedDate = stringValue(entry.recorded_date || todayDate()).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(recordedDate)) {
+    throw apiError(400, "invalid_recorded_date", "記録日の形式が不正です。");
+  }
+
+  return {
+    hours: Math.round(hours * 100) / 100,
+    recordedDate,
+  };
+}
+
+function normalizeEvmPeriodInput(searchParams) {
+  const startDate = stringValue(searchParams.get("start_date")).trim();
+  const endDate = stringValue(searchParams.get("end_date")).trim();
+
+  if (!startDate && !endDate) return {};
+  validateEvmPeriodDates(startDate, endDate);
+
+  return {
+    startDate,
+    endDate,
+  };
+}
+
+function resolveEvmPeriod(repository, searchParams) {
+  const requestedPeriod = normalizeEvmPeriodInput(searchParams);
+  if (requestedPeriod.startDate && requestedPeriod.endDate) return requestedPeriod;
+
+  const storedStartDate = stringValue(repository.evm_display_start_date).trim();
+  const storedEndDate = stringValue(repository.evm_display_end_date).trim();
+  if (!storedStartDate && !storedEndDate) return {};
+  if (!isDateOnly(storedStartDate) || !isDateOnly(storedEndDate)) return {};
+  if (storedStartDate > storedEndDate || daysBetween(storedStartDate, storedEndDate) > 89) return {};
+
+  return {
+    startDate: storedStartDate,
+    endDate: storedEndDate,
+  };
+}
+
+function validateEvmPeriodDates(startDate, endDate) {
+  if (!isDateOnly(startDate) || !isDateOnly(endDate)) {
+    throw apiError(400, "invalid_evm_period", "EVM表示期間は開始日と終了日を指定してください。");
+  }
+  if (startDate > endDate) {
+    throw apiError(400, "invalid_evm_period", "EVM表示期間の開始日は終了日以前にしてください。");
+  }
+  if (daysBetween(startDate, endDate) > 89) {
+    throw apiError(400, "invalid_evm_period", "EVM表示期間は90日以内で指定してください。");
+  }
+}
+
+function isDateOnly(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(stringValue(value));
+}
+
+function normalizeMoneyInput(value, label) {
+  const amount = Number(value);
+  if (!Number.isInteger(amount) || amount < 0 || amount > 999999999) {
+    throw apiError(400, "invalid_money_value", `${label}は0以上の整数で入力してください。`);
+  }
+
+  return amount;
+}
+
 function normalizeManualIssueInput(body) {
   const title = stringValue(body.title).trim();
   if (!title) {
@@ -2010,7 +2770,10 @@ function normalizeManualIssueInput(body) {
     title: title.slice(0, 240),
     description: stringValue(body.description || title).trim().slice(0, 1000),
     assigneeUsername: normalizeAssigneeUsername(body.assignee_username || body.assignee),
-    storyPoint: normalizeStoryPoint(body.story_point, { defaultValue: 1 }),
+    estimatedHours: normalizeEstimatedHours(
+      body.estimated_hours ?? body.estimatedHours,
+      { defaultValue: defaultEstimatedHours },
+    ),
     kanbanColumn: normalizeKanbanColumn(body.kanban_column || "Backlog"),
   };
 }
@@ -2022,8 +2785,11 @@ function normalizeIssueUpdateInput(body) {
     input.kanbanColumn = normalizeKanbanColumn(body.kanban_column);
   }
 
-  if (body.story_point !== undefined) {
-    input.storyPoint = normalizeStoryPoint(body.story_point, { defaultValue: 0 });
+  if (body.estimated_hours !== undefined || body.estimatedHours !== undefined) {
+    input.estimatedHours = normalizeEstimatedHours(
+      body.estimated_hours ?? body.estimatedHours,
+      { defaultValue: defaultEstimatedHours },
+    );
   }
 
   if (Object.keys(input).length === 0) {
@@ -2042,15 +2808,15 @@ function normalizeKanbanColumn(value) {
   return column;
 }
 
-function normalizeStoryPoint(value, options = {}) {
+function normalizeEstimatedHours(value, options = {}) {
   const rawValue =
-    value === undefined || value === null || value === "" ? options.defaultValue : value;
-  const point = Number(rawValue);
-  if (!Number.isInteger(point) || point < 0 || point > 99) {
-    throw apiError(400, "invalid_story_point", "Story Pointは0以上99以下の整数で入力してください。");
+    value === undefined || value === null || value === "" ? options.defaultValue ?? defaultEstimatedHours : value;
+  const hours = Number(rawValue);
+  if (!Number.isFinite(hours) || hours < 0 || hours > 999) {
+    throw apiError(400, "invalid_estimated_hours", "見積時間は0以上999以下で入力してください。");
   }
 
-  return point;
+  return Math.round(hours * 4) / 4;
 }
 
 function normalizeAssigneeUsername(value) {

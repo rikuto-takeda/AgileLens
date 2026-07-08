@@ -14,7 +14,7 @@ const state = {
   selectedIssueId: null,
   sidebarOpen: false,
   taskDialogOpen: false,
-  pointDialogOpen: false,
+  estimateDialogOpen: false,
   repoLoading: false,
   repoLoadError: null,
   repoDialogOpen: false,
@@ -31,6 +31,15 @@ const state = {
   lastProgressSyncedAt: null,
   taskSaveBusy: false,
   issueSaveBusy: false,
+  evmLoading: false,
+  evmError: null,
+  evmSavingHours: false,
+  repoSettingsSaving: false,
+  evmPeriodApplying: false,
+  evmPeriodStart: "",
+  evmPeriodEnd: "",
+  evmSummary: null,
+  evmToday: null,
   claudeTaskGenerating: false,
   claudeTaskError: null,
   repoForm: {
@@ -76,16 +85,8 @@ const sprints = [
 ];
 
 let issues = [];
-
-const evmData = [
-  { day: "Day 1", pv: 12000, ev: 0, ac: 18000 },
-  { day: "Day 2", pv: 24000, ev: 0, ac: 30000 },
-  { day: "Day 3", pv: 36000, ev: 24000, ac: 43000 },
-  { day: "Day 4", pv: 48000, ev: 60000, ac: 55000 },
-  { day: "Day 5", pv: 60000, ev: 60000, ac: 70000 },
-  { day: "Day 6", pv: 72000, ev: 96000, ac: 81000 },
-  { day: "Day 7", pv: 84000, ev: 96000, ac: 92000 },
-];
+let evmData = [];
+const defaultEstimatedHours = 0.5;
 
 const app = document.querySelector("#app");
 
@@ -304,7 +305,7 @@ function renderRepositoryDialog() {
                 </div>
               `
           }
-          <p class="form-note">時給とポイント単価は追加後に設定します。</p>
+          <p class="form-note">時給は追加後に設定します。</p>
           ${state.githubRepoLoadError ? `<p class="form-error">${escapeHtml(state.githubRepoLoadError)}</p>` : ""}
           ${state.repoSaveError ? `<p class="form-error">${escapeHtml(state.repoSaveError)}</p>` : ""}
         </div>
@@ -423,7 +424,7 @@ function renderBoard() {
         .join("")}
     </div>
     ${state.taskDialogOpen ? renderTaskDialog() : ""}
-    ${state.pointDialogOpen ? renderPointDialog() : ""}
+    ${state.estimateDialogOpen ? renderEstimateDialog() : ""}
   `;
 }
 
@@ -457,10 +458,8 @@ function renderTaskDialog() {
               <input id="task-assignee" type="text" value="AK" maxlength="3" data-task-field="assignee" />
             </div>
             <div class="field">
-              <label for="task-point">Story Point</label>
-              <select id="task-point" data-task-field="story_point">
-                ${[1, 2, 3, 5, 8, 13].map((point) => `<option value="${point}">${point}</option>`).join("")}
-              </select>
+              <label for="task-estimated-hours">見積時間</label>
+              <input id="task-estimated-hours" type="number" min="0" max="999" step="0.25" value="${defaultEstimatedHours}" data-task-field="estimated_hours" />
             </div>
           </div>
         </div>
@@ -475,17 +474,18 @@ function renderTaskDialog() {
   `;
 }
 
-function renderPointDialog() {
+function renderEstimateDialog() {
   const issue = issues.find((item) => item.id === state.selectedIssueId);
   if (!issue) return "";
   const description = issue.description || "詳細は未登録です。";
+  const estimatedHours = Number(issue.estimated_hours ?? defaultEstimatedHours);
 
   return `
-    <div class="modal-backdrop" data-action="close-point-dialog">
-      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="point-dialog-title">
+    <div class="modal-backdrop" data-action="close-estimate-dialog">
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="estimate-dialog-title">
         <div class="modal-header">
-          <h3 id="point-dialog-title">タスク詳細</h3>
-          <button class="icon-button modal-close" data-action="close-point-dialog" aria-label="閉じる">×</button>
+          <h3 id="estimate-dialog-title">タスク詳細</h3>
+          <button class="icon-button modal-close" data-action="close-estimate-dialog" aria-label="閉じる">×</button>
         </div>
         <div class="modal-body">
           <p class="dialog-task-title">${escapeHtml(issue.title)}</p>
@@ -494,20 +494,13 @@ function renderPointDialog() {
             <p>${escapeHtml(description)}</p>
           </div>
           <div class="field">
-            <label for="edit-story-point">Story Point</label>
-            <select id="edit-story-point" data-point-field="story_point">
-              ${[0, 1, 2, 3, 5, 8, 13]
-                .map(
-                  (point) =>
-                    `<option value="${point}" ${issue.story_point === point ? "selected" : ""}>${point}</option>`,
-                )
-                .join("")}
-            </select>
+            <label for="edit-estimated-hours">見積時間</label>
+            <input id="edit-estimated-hours" type="number" min="0" max="999" step="0.25" value="${estimatedHours}" data-estimate-field="estimated_hours" />
           </div>
         </div>
         <div class="modal-footer">
-          <button class="secondary-button" data-action="close-point-dialog">キャンセル</button>
-          <button class="primary-button" data-action="save-point" ${state.issueSaveBusy ? "disabled" : ""}>
+          <button class="secondary-button" data-action="close-estimate-dialog">キャンセル</button>
+          <button class="primary-button" data-action="save-estimate" ${state.issueSaveBusy ? "disabled" : ""}>
             ${state.issueSaveBusy ? "保存中" : "保存"}
           </button>
         </div>
@@ -533,6 +526,22 @@ function formatDateTime(dateText) {
   }).format(date);
 }
 
+function formatHours(value) {
+  const hours = Number(value || 0);
+  if (!Number.isFinite(hours)) return "0";
+  return Number.isInteger(hours) ? String(hours) : hours.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function estimateTaskHours(title, description = "") {
+  return defaultEstimatedHours;
+}
+
+function normalizeEstimatedHours(value, fallbackValue = defaultEstimatedHours) {
+  const hours = Number(value);
+  if (!Number.isFinite(hours) || hours < 0) return fallbackValue;
+  return Math.min(999, Math.round(hours * 4) / 4);
+}
+
 function calculateDueDate(startDate, cycleDays) {
   const date = new Date(`${startDate}T00:00:00`);
   date.setDate(date.getDate() + cycleDays - 1);
@@ -543,13 +552,14 @@ function renderIssueCard(issue) {
   const assignee = issue.assignee || issue.assignee_username || "NA";
   const context = issue.task_context || (issue.source === "claude" ? "CLAUDE" : assignee);
   const contextClass = contextBadgeClass(context);
+  const estimatedHours = Number(issue.estimated_hours ?? defaultEstimatedHours);
 
   return `
     <article class="issue-card" draggable="true" data-issue-id="${issue.id}">
       <p class="issue-title">${escapeHtml(issue.title)}</p>
       <div class="issue-meta">
         <span class="context-badge ${contextClass}" title="${escapeHtml(context)}">${escapeHtml(context)}</span>
-        <span class="point-pill">sp:${issue.story_point}</span>
+        <span class="estimate-pill">${formatHours(estimatedHours)}h</span>
       </div>
     </article>
   `;
@@ -576,11 +586,7 @@ function contextBadgeClass(context) {
 
 function renderAnalytics() {
   const repo = currentRepo();
-  const latestEvm = evmData[evmData.length - 1];
-  const sv = latestEvm.ev - latestEvm.pv;
-  const cv = latestEvm.ev - latestEvm.ac;
-  const spi = latestEvm.pv === 0 ? 0 : latestEvm.ev / latestEvm.pv;
-  const cpi = latestEvm.ac === 0 ? 0 : latestEvm.ev / latestEvm.ac;
+  const summary = state.evmSummary || emptyEvmSummary(repo);
 
   return `
     <div class="analytics-grid">
@@ -590,39 +596,10 @@ function renderAnalytics() {
           <p>プロジェクト全体のPV/EV/ACを可視化します。</p>
         </div>
       </div>
+      ${renderEvmControlRow(summary, repo)}
+      ${renderEvmWorkingHoursTable(summary)}
+      ${state.evmError ? `<p class="form-error board-message">${escapeHtml(state.evmError)}</p>` : ""}
       <div class="analytics-top">
-        <div class="analytics-settings-row">
-          <section class="panel compact-panel">
-            <div class="panel-header">
-              <h3>本日の稼働時間入力</h3>
-            </div>
-            <div class="panel-body">
-              <div class="form-row">
-                <div class="field">
-                  <label for="working-hours">稼働時間</label>
-                  <input id="working-hours" type="number" min="0" step="0.25" value="4.5" />
-                </div>
-                <div class="unit-label">時間</div>
-                <button class="primary-button" data-action="save-hours">登録</button>
-              </div>
-            </div>
-          </section>
-          <section class="panel compact-panel">
-            <div class="panel-header">
-              <h3>時給設定</h3>
-            </div>
-            <div class="panel-body">
-              <div class="form-row wage-form-row">
-                <div class="field">
-                  <label for="hourly-wage">時給</label>
-                  <input id="hourly-wage" type="number" min="0" step="100" value="${repo.hourly_wage}" data-repo-field="hourly_wage" />
-                </div>
-                <div class="unit-label">円</div>
-                <button class="primary-button" data-action="save-hourly-wage">保存</button>
-              </div>
-            </div>
-          </section>
-        </div>
         <section class="panel">
           <div class="panel-header">
             <h3>サマリー</h3>
@@ -630,20 +607,28 @@ function renderAnalytics() {
           <div class="panel-body">
             <div class="summary-grid">
               <div class="metric">
+                <span>BAC</span>
+                <strong>${formatCurrency(summary.bac ?? summary.total_budget ?? 0)}</strong>
+              </div>
+              <div class="metric">
+                <span>進捗率</span>
+                <strong>${formatPercent(summary.progress_rate)}</strong>
+              </div>
+              <div class="metric">
                 <span>SV</span>
-                <strong class="${sv >= 0 ? "metric-good" : "metric-bad"}">${formatCurrency(sv)}</strong>
+                <strong class="${summary.schedule_variance >= 0 ? "metric-good" : "metric-bad"}">${formatCurrency(summary.schedule_variance)}</strong>
               </div>
               <div class="metric">
                 <span>CV</span>
-                <strong class="${cv >= 0 ? "metric-good" : "metric-bad"}">${formatCurrency(cv)}</strong>
+                <strong class="${summary.cost_variance >= 0 ? "metric-good" : "metric-bad"}">${formatCurrency(summary.cost_variance)}</strong>
               </div>
               <div class="metric">
                 <span>SPI</span>
-                <strong class="${spi >= 1 ? "metric-good" : "metric-bad"}">${spi.toFixed(2)}</strong>
+                <strong class="${summary.spi >= 1 ? "metric-good" : "metric-bad"}">${Number(summary.spi || 0).toFixed(2)}</strong>
               </div>
               <div class="metric">
                 <span>CPI</span>
-                <strong class="${cpi >= 1 ? "metric-good" : "metric-bad"}">${cpi.toFixed(2)}</strong>
+                <strong class="${summary.cpi >= 1 ? "metric-good" : "metric-bad"}">${Number(summary.cpi || 0).toFixed(2)}</strong>
               </div>
             </div>
           </div>
@@ -655,6 +640,7 @@ function renderAnalytics() {
           <span class="status-pill">PV / EV / AC</span>
         </div>
         <div class="panel-body">
+          ${state.evmLoading ? '<div class="column-empty">EVMを生成しています</div>' : ""}
           <div class="chart-wrap">
             ${renderChart()}
           </div>
@@ -669,28 +655,167 @@ function renderAnalytics() {
   `;
 }
 
+function renderEvmControlRow(summary, repo) {
+  const startDate = state.evmPeriodStart || summary.display_start_date || summary.start_date || "";
+  const endDate = state.evmPeriodEnd || summary.display_end_date || summary.due_on || "";
+  const hourlyWage = Number(repo?.hourly_wage || 0);
+
+  return `
+    <div class="evm-control-row">
+      <section class="panel compact-panel evm-period-panel">
+        <div class="panel-header">
+          <h3>表示期間</h3>
+        </div>
+        <div class="panel-body">
+          <table class="evm-period-table evm-control-table">
+            <thead>
+              <tr>
+                <th>表示開始日</th>
+                <th>表示終了日</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <input type="date" value="${escapeHtml(startDate)}" data-evm-period-field="start_date" />
+                </td>
+                <td>
+                  <input type="date" value="${escapeHtml(endDate)}" data-evm-period-field="end_date" />
+                </td>
+                <td>
+                  <button class="primary-button" data-action="apply-evm-period" ${state.evmPeriodApplying ? "disabled" : ""}>
+                    ${state.evmPeriodApplying ? "反映中" : "反映"}
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel compact-panel evm-price-panel">
+        <div class="panel-header">
+          <h3>EVM時給設定</h3>
+        </div>
+        <div class="panel-body">
+          <div class="form-row wage-form-row">
+            <div class="field">
+              <label for="hourly-wage">時給</label>
+              <input id="hourly-wage" type="number" min="0" step="100" value="${hourlyWage}" data-repo-field="hourly_wage" />
+            </div>
+            <button class="primary-button" data-action="save-repo-settings" ${state.repoSettingsSaving ? "disabled" : ""}>
+              ${state.repoSettingsSaving ? "保存中" : "保存"}
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderEvmWorkingHoursTable(summary) {
+  const startDate = state.evmPeriodStart || summary.display_start_date || summary.start_date || "";
+  const endDate = state.evmPeriodEnd || summary.display_end_date || summary.due_on || "";
+  const rows = evmData.length > 0
+    ? evmData
+    : startDate && endDate
+      ? [{ date: startDate, daily_working_hours: 0, daily_actual_cost: 0, completed_estimated_hours: 0 }]
+      : [];
+  const dateCells = rows
+    .map((item) => `<td>${escapeHtml(item.date || "")}</td>`)
+    .join("");
+  const hourCells = rows
+    .map((item) => {
+      const hours = Number(item.daily_working_hours || 0);
+      const date = escapeHtml(item.date || "");
+      return `
+        <td>
+          <input
+            aria-label="${date}の稼働時間"
+            type="number"
+            min="0"
+            max="24"
+            step="0.25"
+            value="${hours}"
+            data-working-hours-date="${date}"
+          />
+        </td>
+      `;
+    })
+    .join("");
+
+  return `
+    <section class="panel evm-hours-panel">
+      <div class="panel-header evm-hours-header">
+        <h3>日付別稼働時間</h3>
+        <button class="primary-button" data-action="save-period-hours" ${state.evmSavingHours || rows.length === 0 ? "disabled" : ""}>
+          ${state.evmSavingHours ? "保存中" : "保存"}
+        </button>
+      </div>
+      <div class="panel-body">
+        <table class="evm-period-table evm-hours-table">
+          <tbody>
+            ${
+              rows.length > 0
+                ? `<tr class="evm-date-row">${dateCells}</tr><tr class="evm-time-row">${hourCells}</tr>`
+                : '<tr><td class="table-empty">表示期間を反映すると日付ごとに入力できます</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
 function formatCurrency(value) {
   const sign = value < 0 ? "-" : "";
   return `${sign}¥${Math.abs(value).toLocaleString()}`;
 }
 
+function formatPercent(value) {
+  const percent = Number(value || 0) * 100;
+  return `${percent.toFixed(1).replace(/\.0$/, "")}%`;
+}
+
+function emptyEvmSummary(repo) {
+  return {
+    total_estimated_hours: 0,
+    completed_estimated_hours: 0,
+    progress_estimated_hours: 0,
+    progress_rate: 0,
+    bac: 0,
+    total_budget: 0,
+    planned_value: 0,
+    earned_value: 0,
+    actual_cost: 0,
+    schedule_variance: 0,
+    cost_variance: 0,
+    spi: 0,
+    cpi: 0,
+    hourly_wage: Number(repo?.hourly_wage || 0),
+  };
+}
+
 function renderChart() {
+  const chartData = evmData.length > 0 ? evmData : [{ day: "Today", pv: 0, ev: 0, ac: 0 }];
+  const bac = Number(state.evmSummary?.bac ?? state.evmSummary?.total_budget ?? 0);
   const width = 760;
   const height = 340;
-  const padding = { top: 24, right: 26, bottom: 44, left: 70 };
-  const maxValue = Math.max(...evmData.flatMap((item) => [item.pv, item.ev, item.ac]));
+  const padding = { top: 24, right: 26, bottom: 44, left: 92 };
+  const maxValue = Math.max(1, bac, ...chartData.flatMap((item) => [item.pv, item.ev, item.ac]));
   const innerWidth = width - padding.left - padding.right;
   const innerHeight = height - padding.top - padding.bottom;
-  const xStep = innerWidth / (evmData.length - 1);
+  const xStep = chartData.length > 1 ? innerWidth / (chartData.length - 1) : 0;
 
   function point(value, index) {
-    const x = padding.left + xStep * index;
-    const y = padding.top + innerHeight - (value / maxValue) * innerHeight;
+    const chartValue = Math.max(0, Math.min(Number(value || 0), maxValue));
+    const x = chartData.length > 1 ? padding.left + xStep * index : padding.left + innerWidth / 2;
+    const y = padding.top + innerHeight - (chartValue / maxValue) * innerHeight;
     return `${x},${y}`;
   }
 
   function polyline(key) {
-    return evmData.map((item, index) => point(item[key], index)).join(" ");
+    return chartData.map((item, index) => point(item[key], index)).join(" ");
   }
 
   return `
@@ -698,7 +823,11 @@ function renderChart() {
       ${[0, 1, 2, 3, 4]
         .map((tick) => {
           const y = padding.top + (innerHeight / 4) * tick;
-          return `<line class="chart-grid" x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" />`;
+          const value = Math.round(bac * ((4 - tick) / 4));
+          return `
+            <line class="chart-grid" x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" />
+            <text class="chart-y-label" x="${padding.left - 10}" y="${y + 4}" text-anchor="end">${escapeHtml(formatCurrency(value))}</text>
+          `;
         })
         .join("")}
       <line class="chart-axis" x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${height - padding.bottom}" />
@@ -706,13 +835,12 @@ function renderChart() {
       <polyline class="line-pv" points="${polyline("pv")}" />
       <polyline class="line-ev" points="${polyline("ev")}" />
       <polyline class="line-ac" points="${polyline("ac")}" />
-      ${evmData
+      ${chartData
         .map((item, index) => {
-          const x = padding.left + xStep * index;
-          return `<text x="${x}" y="${height - 16}" text-anchor="middle" fill="#607080" font-size="12">${item.day}</text>`;
+          const x = chartData.length > 1 ? padding.left + xStep * index : padding.left + innerWidth / 2;
+          return `<text x="${x}" y="${height - 16}" text-anchor="middle" fill="#607080" font-size="12">${escapeHtml(item.day)}</text>`;
         })
         .join("")}
-      <text x="18" y="30" fill="#607080" font-size="12">金額</text>
     </svg>
   `;
 }
@@ -725,6 +853,7 @@ function bindDashboardEvents() {
   document.querySelectorAll("[data-repo-id]").forEach((button) => {
     button.addEventListener("click", async () => {
       state.selectedRepoId = button.dataset.repoId;
+      syncEvmPeriodState(currentRepo());
       ensureDefaultSprint(state.selectedRepoId);
       const nextSprint = sprints.find((sprint) => sprint.repository_id === state.selectedRepoId);
       if (nextSprint) {
@@ -739,6 +868,9 @@ function bindDashboardEvents() {
       window.location.hash = `/projects/${state.selectedRepoId}/${state.view}`;
       render();
       await loadIssues(state.selectedRepoId);
+      if (state.view === "analytics") {
+        await loadEvm(state.selectedRepoId);
+      }
       render();
     });
   });
@@ -749,7 +881,7 @@ function bindDashboardEvents() {
     });
     card.addEventListener("click", () => {
       state.selectedIssueId = card.dataset.issueId;
-      state.pointDialogOpen = true;
+      state.estimateDialogOpen = true;
       render();
     });
   });
@@ -790,16 +922,26 @@ function bindDashboardEvents() {
     });
   }
 
-  const actionMap = {
-    "save-hours": "本日の稼働時間を登録し、ACスナップショットを更新しました",
-  };
+  const saveHoursButton = document.querySelector("[data-action='save-hours']");
+  if (saveHoursButton) {
+    saveHoursButton.addEventListener("click", async () => {
+      await saveWorkingHours();
+    });
+  }
 
-  Object.keys(actionMap).forEach((action) => {
-    const button = document.querySelector(`[data-action='${action}']`);
-    if (button) {
-      button.addEventListener("click", () => showToast(actionMap[action]));
-    }
-  });
+  const savePeriodHoursButton = document.querySelector("[data-action='save-period-hours']");
+  if (savePeriodHoursButton) {
+    savePeriodHoursButton.addEventListener("click", async () => {
+      await savePeriodWorkingHours();
+    });
+  }
+
+  const applyEvmPeriodButton = document.querySelector("[data-action='apply-evm-period']");
+  if (applyEvmPeriodButton) {
+    applyEvmPeriodButton.addEventListener("click", async () => {
+      await applyEvmPeriod();
+    });
+  }
 
   const toggleSidebar = document.querySelector("[data-action='toggle-sidebar']");
   if (toggleSidebar) {
@@ -861,10 +1003,10 @@ function bindDashboardEvents() {
     });
   });
 
-  document.querySelectorAll("[data-action='close-point-dialog']").forEach((element) => {
+  document.querySelectorAll("[data-action='close-estimate-dialog']").forEach((element) => {
     element.addEventListener("click", (event) => {
       event.stopPropagation();
-      state.pointDialogOpen = false;
+      state.estimateDialogOpen = false;
       state.selectedIssueId = null;
       render();
     });
@@ -905,28 +1047,43 @@ function bindDashboardEvents() {
     });
   }
 
-  const savePointButton = document.querySelector("[data-action='save-point']");
-  if (savePointButton) {
-    savePointButton.addEventListener("click", async () => {
+  const taskTitleInput = document.querySelector("[data-task-field='title']");
+  const taskEstimatedHoursInput = document.querySelector("[data-task-field='estimated_hours']");
+  if (taskTitleInput && taskEstimatedHoursInput) {
+    let estimateTouched = false;
+    taskEstimatedHoursInput.addEventListener("input", () => {
+      estimateTouched = true;
+    });
+    taskTitleInput.addEventListener("input", () => {
+      if (estimateTouched) return;
+      taskEstimatedHoursInput.value = formatHours(estimateTaskHours(taskTitleInput.value));
+    });
+  }
+
+  const saveEstimateButton = document.querySelector("[data-action='save-estimate']");
+  if (saveEstimateButton) {
+    saveEstimateButton.addEventListener("click", async () => {
       const issue = issues.find((item) => item.id === state.selectedIssueId);
       if (!issue) return;
 
-      const storyPoint = Number(document.querySelector("[data-point-field='story_point']").value);
-      const previousPoint = issue.story_point;
-      issue.story_point = storyPoint;
+      const estimatedHours = normalizeEstimatedHours(
+        document.querySelector("[data-estimate-field='estimated_hours']").value,
+      );
+      const previousEstimatedHours = issue.estimated_hours;
+      issue.estimated_hours = estimatedHours;
       state.issueSaveBusy = true;
       render();
 
       try {
-        const data = await updateIssue(issue.id, { story_point: storyPoint });
+        const data = await updateIssue(issue.id, { estimated_hours: estimatedHours });
         mergeIssue(data.issue);
         state.issueSaveBusy = false;
-        state.pointDialogOpen = false;
+        state.estimateDialogOpen = false;
         state.selectedIssueId = null;
         render();
-        showToast("Story PointをDBに保存しました");
+        showToast("見積時間をDBに保存しました");
       } catch (error) {
-        issue.story_point = previousPoint;
+        issue.estimated_hours = previousEstimatedHours;
         state.issueSaveBusy = false;
         render();
         showToast(error.message);
@@ -934,13 +1091,10 @@ function bindDashboardEvents() {
     });
   }
 
-  const saveHourlyWageButton = document.querySelector("[data-action='save-hourly-wage']");
-  if (saveHourlyWageButton) {
-    saveHourlyWageButton.addEventListener("click", () => {
-      const repo = currentRepo();
-      repo.hourly_wage = Number(document.querySelector("[data-repo-field='hourly_wage']").value) || 0;
-      render();
-      showToast("時給設定を保存しました");
+  const saveRepoSettingsButton = document.querySelector("[data-action='save-repo-settings']");
+  if (saveRepoSettingsButton) {
+    saveRepoSettingsButton.addEventListener("click", async () => {
+      await saveRepositorySettings();
     });
   }
 
@@ -1038,6 +1192,42 @@ async function loadIssues(repositoryId = state.selectedRepoId) {
   }
 }
 
+async function loadEvm(repositoryId = state.selectedRepoId) {
+  if (!repositoryId) {
+    evmData = [];
+    state.evmSummary = null;
+    state.evmToday = null;
+    return;
+  }
+
+  state.evmLoading = true;
+  state.evmError = null;
+
+  try {
+    const data = await apiRequest(
+      `/api/repositories/${encodeURIComponent(repositoryId)}/evm${evmPeriodQuery()}`,
+    );
+    applyEvmResponse(data);
+  } catch (error) {
+    evmData = [];
+    state.evmSummary = null;
+    state.evmToday = null;
+    state.evmError = error.message;
+  } finally {
+    state.evmLoading = false;
+  }
+}
+
+function evmPeriodQuery() {
+  if (!state.evmPeriodStart || !state.evmPeriodEnd) return "";
+
+  const params = new URLSearchParams({
+    start_date: state.evmPeriodStart,
+    end_date: state.evmPeriodEnd,
+  });
+  return `?${params.toString()}`;
+}
+
 async function loadGithubRepositories() {
   state.githubRepoLoading = true;
   state.githubRepoLoadError = null;
@@ -1058,6 +1248,200 @@ async function loadGithubRepositories() {
   }
 }
 
+async function saveWorkingHours() {
+  if (!state.selectedRepoId) return;
+
+  const hours = Number(document.querySelector("#working-hours")?.value || 0);
+  state.evmSavingHours = true;
+  state.evmError = null;
+  render();
+
+  try {
+    const data = await apiRequest(
+      `/api/repositories/${encodeURIComponent(state.selectedRepoId)}/evm/working-hours`,
+      {
+        method: "POST",
+        body: {
+          hours,
+        },
+      },
+    );
+    applyEvmResponse(data);
+    await loadEvm(state.selectedRepoId);
+    state.evmSavingHours = false;
+    render();
+    showToast("稼働時間を保存し、EVMを更新しました");
+  } catch (error) {
+    state.evmSavingHours = false;
+    state.evmError = error.message;
+    render();
+  }
+}
+
+async function savePeriodWorkingHours() {
+  if (!state.selectedRepoId) return;
+
+  const entries = Array.from(document.querySelectorAll("[data-working-hours-date]")).map((input) => ({
+    recorded_date: input.dataset.workingHoursDate,
+    hours: Number(input.value || 0),
+  }));
+
+  if (entries.length === 0) {
+    showToast("保存する稼働時間がありません");
+    return;
+  }
+
+  const invalidEntry = entries.find(
+    (entry) => !entry.recorded_date || !Number.isFinite(entry.hours) || entry.hours < 0 || entry.hours > 24,
+  );
+  if (invalidEntry) {
+    showToast("稼働時間は0以上24以下で入力してください");
+    return;
+  }
+
+  state.evmSavingHours = true;
+  state.evmError = null;
+  render();
+
+  try {
+    const data = await apiRequest(
+      `/api/repositories/${encodeURIComponent(state.selectedRepoId)}/evm/working-hours${evmPeriodQuery()}`,
+      {
+        method: "POST",
+        body: {
+          entries,
+        },
+      },
+    );
+    applyEvmResponse(data);
+    state.evmSavingHours = false;
+    render();
+    showToast("日付別の稼働時間を保存しました");
+  } catch (error) {
+    state.evmSavingHours = false;
+    state.evmError = error.message;
+    render();
+  }
+}
+
+async function applyEvmPeriod() {
+  if (!state.selectedRepoId) return;
+
+  const { startDate, endDate } = readEvmPeriodInputs();
+
+  if (!startDate || !endDate) {
+    showToast("表示開始日と表示終了日を入力してください");
+    return;
+  }
+  const periodError = validateEvmPeriodSelection(startDate, endDate);
+  if (periodError) {
+    showToast(periodError);
+    return;
+  }
+
+  state.evmPeriodStart = startDate;
+  state.evmPeriodEnd = endDate;
+  state.evmPeriodApplying = true;
+  state.evmError = null;
+  render();
+
+  try {
+    const settings = await apiRequest(
+      `/api/repositories/${encodeURIComponent(state.selectedRepoId)}/settings`,
+      {
+        method: "PATCH",
+        body: {
+          evm_display_start_date: startDate,
+          evm_display_end_date: endDate,
+        },
+      },
+    );
+    upsertRepository(settings.repository);
+    await loadEvm(state.selectedRepoId);
+    state.evmPeriodApplying = false;
+    render();
+    if (!state.evmError) {
+      showToast("EVM表示期間を保存しました");
+    }
+  } catch (error) {
+    state.evmPeriodApplying = false;
+    state.evmError = error.message;
+    render();
+  }
+}
+
+async function saveRepositorySettings() {
+  const repo = currentRepo();
+  if (!repo) return;
+
+  const hourlyWage = Number(document.querySelector("[data-repo-field='hourly_wage']")?.value || 0);
+  const body = {
+    hourly_wage: hourlyWage,
+  };
+
+  state.repoSettingsSaving = true;
+  state.evmError = null;
+  render();
+
+  try {
+    const data = await apiRequest(`/api/repositories/${encodeURIComponent(repo.id)}/settings`, {
+      method: "PATCH",
+      body,
+    });
+    upsertRepository(data.repository);
+    await loadEvm(repo.id);
+    state.repoSettingsSaving = false;
+    render();
+    showToast("EVM時給設定を保存しました");
+  } catch (error) {
+    state.repoSettingsSaving = false;
+    state.evmError = error.message;
+    render();
+  }
+}
+
+function readEvmPeriodInputs() {
+  return {
+    startDate: document.querySelector("[data-evm-period-field='start_date']")?.value || "",
+    endDate: document.querySelector("[data-evm-period-field='end_date']")?.value || "",
+  };
+}
+
+function validateEvmPeriodSelection(startDate, endDate) {
+  if (startDate > endDate) {
+    return "表示開始日は表示終了日以前にしてください";
+  }
+  if (daysBetweenDates(startDate, endDate) > 89) {
+    return "表示期間は90日以内で指定してください";
+  }
+  return "";
+}
+
+function daysBetweenDates(startDate, endDate) {
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+  return Math.floor((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function applyEvmResponse(data) {
+  if (data.repository) {
+    upsertRepository(data.repository);
+  }
+
+  evmData = data.evm?.series || [];
+  state.evmSummary = data.evm?.summary || null;
+  state.evmToday = data.evm?.today || null;
+  syncEvmPeriodState(data.repository || currentRepo(), data.evm?.summary);
+}
+
+function syncEvmPeriodState(repository, summary = null) {
+  state.evmPeriodStart =
+    repository?.evm_display_start_date || summary?.display_start_date || summary?.start_date || "";
+  state.evmPeriodEnd =
+    repository?.evm_display_end_date || summary?.display_end_date || summary?.due_on || "";
+}
+
 function selectRepositoryFromRoute() {
   const route = parseRoute();
   const routedRepo = route.repoId
@@ -1068,6 +1452,7 @@ function selectRepositoryFromRoute() {
 
   state.selectedRepoId = nextRepo ? nextRepo.id : null;
   if (nextRepo) {
+    syncEvmPeriodState(nextRepo);
     ensureDefaultSprint(nextRepo.id);
     const nextSprint = sprints.find((sprint) => sprint.repository_id === nextRepo.id);
     if (nextSprint) {
@@ -1159,7 +1544,7 @@ async function deleteRepositoryFromApp(repositoryId) {
       const nextRepo = repositories[0] || null;
       state.selectedRepoId = nextRepo ? nextRepo.id : null;
       state.selectedIssueId = null;
-      state.pointDialogOpen = false;
+      state.estimateDialogOpen = false;
       state.sidebarOpen = false;
 
       if (nextRepo) {
@@ -1167,8 +1552,14 @@ async function deleteRepositoryFromApp(repositoryId) {
         state.repoDeleteBusyId = null;
         window.location.hash = `/projects/${nextRepo.id}/${state.view}`;
         await loadIssues(nextRepo.id);
+        if (state.view === "analytics") {
+          await loadEvm(nextRepo.id);
+        }
       } else {
         state.repoDeleteBusyId = null;
+        evmData = [];
+        state.evmSummary = null;
+        state.evmToday = null;
         window.location.hash = "/projects";
       }
     } else {
@@ -1189,7 +1580,10 @@ async function createManualTask() {
 
   const title = document.querySelector("[data-task-field='title']")?.value.trim() || "";
   const assignee = document.querySelector("[data-task-field='assignee']")?.value.trim() || "NA";
-  const storyPoint = Number(document.querySelector("[data-task-field='story_point']")?.value || 1);
+  const estimatedHoursInput = document.querySelector("[data-task-field='estimated_hours']");
+  const estimatedHours = estimatedHoursInput?.value
+    ? normalizeEstimatedHours(estimatedHoursInput.value, estimateTaskHours(title))
+    : estimateTaskHours(title);
 
   if (!title) {
     showToast("Issueタイトルを入力してください");
@@ -1208,7 +1602,7 @@ async function createManualTask() {
           title,
           description: title,
           assignee_username: assignee.slice(0, 32),
-          story_point: storyPoint,
+          estimated_hours: estimatedHours,
           kanban_column: "Backlog",
         },
       },
@@ -1369,6 +1763,9 @@ async function initAuth() {
     if (state.loggedIn) {
       await loadRepositories();
       await loadIssues();
+      if (state.view === "analytics") {
+        await loadEvm();
+      }
     }
   } catch (error) {
     state.authConfigured = true;
@@ -1428,8 +1825,13 @@ window.addEventListener("hashchange", () => {
     const repo = repositories.find((item) => item.id === route.repoId);
     if (repo && state.selectedRepoId !== repo.id) {
       state.selectedRepoId = repo.id;
+      syncEvmPeriodState(repo);
       ensureDefaultSprint(repo.id);
-      loadIssues(repo.id).then(() => render());
+      loadIssues(repo.id)
+        .then(() => (route.view === "analytics" ? loadEvm(repo.id) : null))
+        .then(() => render());
+    } else if (repo && route.view === "analytics") {
+      loadEvm(repo.id).then(() => render());
     }
   }
   render();
