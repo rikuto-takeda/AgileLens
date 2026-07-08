@@ -58,6 +58,21 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/repositories") {
+      await handleListRepositories(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/repositories") {
+      await handleCreateRepository(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/github/repositories") {
+      await handleListGithubRepositories(req, res);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/health") {
       sendJson(res, 200, { ok: true, authConfigured: isAuthConfigured() });
       return;
@@ -147,7 +162,7 @@ async function handleAuthCallback(req, res, url) {
     await upsertUserProfile(user, session);
     clearAuthChallengeCookies(res, req);
     setSessionCookies(res, req, session);
-    redirect(res, "/#/projects/repo-1/board");
+    redirect(res, "/#/projects");
   } catch (error) {
     console.error(error);
     clearAuthChallengeCookies(res, req);
@@ -161,36 +176,8 @@ async function handleMe(req, res) {
     return;
   }
 
-  const cookieJar = parseCookies(req);
-  let accessToken = cookieJar[cookies.access];
-  const refreshToken = cookieJar[cookies.refresh];
-
-  if (!accessToken && !refreshToken) {
-    sendJson(res, 200, { authenticated: false, configured: true });
-    return;
-  }
-
   try {
-    let user;
-    if (!accessToken && refreshToken) {
-      const refreshed = await refreshSession(refreshToken);
-      accessToken = refreshed.access_token;
-      refreshed.refresh_token = refreshed.refresh_token || refreshToken;
-      setSessionCookies(res, req, refreshed);
-      user = refreshed.user || (await getSupabaseUser(accessToken));
-    } else {
-      try {
-        user = await getSupabaseUser(accessToken);
-      } catch (error) {
-        if (!refreshToken) throw error;
-        const refreshed = await refreshSession(refreshToken);
-        accessToken = refreshed.access_token;
-        refreshed.refresh_token = refreshed.refresh_token || refreshToken;
-        setSessionCookies(res, req, refreshed);
-        user = refreshed.user || (await getSupabaseUser(accessToken));
-      }
-    }
-
+    const { accessToken, user } = await getAuthenticatedContext(req, res);
     const profile = await getPublicUserProfile(accessToken, user).catch(() => null);
     sendJson(res, 200, {
       authenticated: true,
@@ -200,6 +187,65 @@ async function handleMe(req, res) {
   } catch (error) {
     clearSessionCookies(res, req);
     sendJson(res, 200, { authenticated: false, configured: true });
+  }
+}
+
+async function handleListRepositories(req, res) {
+  try {
+    const { accessToken } = await getAuthenticatedContext(req, res);
+    const repositories = await listRepositories(accessToken);
+    sendJson(res, 200, { repositories });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleListGithubRepositories(req, res) {
+  try {
+    const { accessToken, user } = await getAuthenticatedContext(req, res);
+    const profile = await getPrivateUserProfile(accessToken, user);
+    const githubRepos = await listGithubRepositories(profile?.github_access_token);
+    const registeredRepos = await listRepositories(accessToken);
+    const registeredIds = new Set(
+      registeredRepos.map((repo) => String(repo.github_repo_id)).filter(Boolean),
+    );
+
+    sendJson(res, 200, {
+      repositories: githubRepos.map((repo) => ({
+        id: String(repo.id),
+        full_name: repo.full_name,
+        repo_name: repo.name,
+        owner_name: repo.owner.login,
+        private: Boolean(repo.private),
+        archived: Boolean(repo.archived),
+        html_url: repo.html_url,
+        updated_at: repo.updated_at,
+        registered: registeredIds.has(String(repo.id)),
+      })),
+    });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleCreateRepository(req, res) {
+  try {
+    const { accessToken, user } = await getAuthenticatedContext(req, res);
+    const body = await readJsonBody(req);
+    const input = normalizeRepositoryInput(body);
+    const profile = await getPrivateUserProfile(accessToken, user);
+    const githubRepo = await resolveSelectedGithubRepository(input, profile?.github_access_token);
+    const existingRepo = await findRepositoryByGithubId(accessToken, githubRepo.id);
+
+    if (existingRepo) {
+      sendJson(res, 200, { repository: existingRepo });
+      return;
+    }
+
+    const repository = await createRepository(accessToken, user, githubRepo, input);
+    sendJson(res, 201, { repository });
+  } catch (error) {
+    handleApiError(req, res, error);
   }
 }
 
@@ -214,6 +260,50 @@ async function handleLogout(req, res) {
 
   clearSessionCookies(res, req);
   sendJson(res, 200, { ok: true });
+}
+
+async function getAuthenticatedContext(req, res) {
+  if (!isAuthConfigured()) {
+    throw apiError(503, "auth_not_configured", "Supabase is not configured.");
+  }
+
+  const cookieJar = parseCookies(req);
+  let accessToken = cookieJar[cookies.access];
+  const refreshToken = cookieJar[cookies.refresh];
+
+  if (!accessToken && !refreshToken) {
+    throw apiError(401, "unauthenticated", "Login is required.");
+  }
+
+  if (!accessToken && refreshToken) {
+    const refreshed = await refreshSession(refreshToken);
+    accessToken = refreshed.access_token;
+    refreshed.refresh_token = refreshed.refresh_token || refreshToken;
+    setSessionCookies(res, req, refreshed);
+    return {
+      accessToken,
+      user: refreshed.user || (await getSupabaseUser(accessToken)),
+    };
+  }
+
+  try {
+    return {
+      accessToken,
+      user: await getSupabaseUser(accessToken),
+    };
+  } catch (error) {
+    if (!refreshToken) throw error;
+
+    const refreshed = await refreshSession(refreshToken);
+    accessToken = refreshed.access_token;
+    refreshed.refresh_token = refreshed.refresh_token || refreshToken;
+    setSessionCookies(res, req, refreshed);
+
+    return {
+      accessToken,
+      user: refreshed.user || (await getSupabaseUser(accessToken)),
+    };
+  }
 }
 
 async function exchangeCodeForSession(code, verifier) {
@@ -278,6 +368,205 @@ async function getPublicUserProfile(accessToken, user) {
     },
   );
   return Array.isArray(rows) ? rows[0] : null;
+}
+
+async function getPrivateUserProfile(accessToken, user) {
+  const rows = await supabaseFetch(
+    `/rest/v1/users?id=eq.${encodeURIComponent(user.id)}&select=id,github_access_token`,
+    {
+      method: "GET",
+      accessToken,
+    },
+  );
+  return Array.isArray(rows) ? rows[0] : null;
+}
+
+async function listRepositories(accessToken) {
+  const rows = await supabaseFetch(
+    "/rest/v1/repositories?select=id,github_repo_id,repo_name,owner_name,full_name,hourly_wage,point_unit_price,synced_at,created_at&order=created_at.asc",
+    {
+      method: "GET",
+      accessToken,
+    },
+  );
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function findRepositoryByGithubId(accessToken, githubRepoId) {
+  const rows = await supabaseFetch(
+    `/rest/v1/repositories?github_repo_id=eq.${encodeURIComponent(
+      String(githubRepoId),
+    )}&select=id,github_repo_id,repo_name,owner_name,full_name,hourly_wage,point_unit_price,synced_at,created_at&limit=1`,
+    {
+      method: "GET",
+      accessToken,
+    },
+  );
+  return Array.isArray(rows) ? rows[0] : null;
+}
+
+async function createRepository(accessToken, user, githubRepo, input) {
+  const payload = {
+    user_id: user.id,
+    github_repo_id: String(githubRepo.id),
+    repo_name: githubRepo.name,
+    owner_name: githubRepo.owner.login,
+    hourly_wage: 0,
+    point_unit_price: 0,
+    synced_at: new Date().toISOString(),
+  };
+
+  try {
+    const rows = await supabaseFetch(
+      "/rest/v1/repositories?select=id,github_repo_id,repo_name,owner_name,full_name,hourly_wage,point_unit_price,synced_at,created_at",
+      {
+        method: "POST",
+        accessToken,
+        headers: {
+          Prefer: "return=representation",
+        },
+        body: payload,
+      },
+    );
+    return Array.isArray(rows) ? rows[0] : rows;
+  } catch (error) {
+    if (error.status === 409) {
+      throw apiError(409, "repository_already_registered", "このリポジトリは既に登録されています。");
+    }
+    throw error;
+  }
+}
+
+async function resolveSelectedGithubRepository(input, githubAccessToken) {
+  if (input.githubRepoId) {
+    const repositories = await listGithubRepositories(githubAccessToken);
+    const selected = repositories.find((repo) => String(repo.id) === input.githubRepoId);
+
+    if (!selected) {
+      throw apiError(
+        404,
+        "repository_not_found",
+        "選択したGitHubリポジトリが見つからないか、アクセス権がありません。",
+      );
+    }
+
+    return selected;
+  }
+
+  return fetchGithubRepository(input.ownerName, input.repoName, githubAccessToken);
+}
+
+async function listGithubRepositories(githubAccessToken) {
+  if (!githubAccessToken) {
+    throw apiError(
+      401,
+      "github_token_missing",
+      "GitHubリポジトリ一覧を取得できません。もう一度ログインしてください。",
+    );
+  }
+
+  const repositories = [];
+
+  for (let page = 1; page <= 10; page += 1) {
+    const url = new URL("https://api.github.com/user/repos");
+    url.searchParams.set("affiliation", "owner,collaborator,organization_member");
+    url.searchParams.set("sort", "updated");
+    url.searchParams.set("direction", "desc");
+    url.searchParams.set("per_page", "100");
+    url.searchParams.set("page", String(page));
+
+    const pageItems = await githubFetch(url, githubAccessToken);
+    if (!Array.isArray(pageItems)) {
+      throw apiError(502, "github_request_failed", "GitHubリポジトリ一覧の取得に失敗しました。");
+    }
+
+    repositories.push(...pageItems);
+    if (pageItems.length < 100) break;
+  }
+
+  return repositories;
+}
+
+async function fetchGithubRepository(ownerName, repoName, githubAccessToken) {
+  return githubFetch(
+    `https://api.github.com/repos/${encodeURIComponent(ownerName)}/${encodeURIComponent(repoName)}`,
+    githubAccessToken,
+  );
+}
+
+async function githubFetch(url, githubAccessToken) {
+  const headers = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "AgileLens",
+    "X-GitHub-Api-Version": "2022-11-28",
+    ...(githubAccessToken ? { Authorization: `Bearer ${githubAccessToken}` } : {}),
+  };
+
+  const response = await fetch(url, { headers });
+  const data = await response.json().catch(() => null);
+
+  if (response.ok) {
+    return data;
+  }
+
+  if (response.status === 404) {
+    throw apiError(
+      404,
+      "repository_not_found",
+      "GitHubリポジトリが見つからないか、アクセス権がありません。",
+    );
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    throw apiError(
+      response.status,
+      "github_access_denied",
+      data?.message || "GitHubリポジトリへのアクセス権を確認できませんでした。",
+    );
+  }
+
+  throw apiError(
+    502,
+    "github_request_failed",
+    data?.message || "GitHub APIリクエストに失敗しました。",
+  );
+}
+
+function normalizeRepositoryInput(body) {
+  const githubRepoId = stringValue(body.github_repo_id).trim();
+  const fullName = String(body.full_name || "").trim();
+
+  if (githubRepoId) {
+    if (!/^\d+$/.test(githubRepoId)) {
+      throw apiError(400, "invalid_repository_id", "GitHubリポジトリの選択が不正です。");
+    }
+
+    return {
+      githubRepoId,
+      ownerName: "",
+      repoName: "",
+    };
+  }
+
+  const [ownerName, repoName, ...rest] = fullName.split("/");
+
+  if (!ownerName || !repoName || rest.length > 0) {
+    throw apiError(400, "invalid_repository_name", "リポジトリは owner/repo 形式で入力してください。");
+  }
+
+  if (!isSafeGitHubPathPart(ownerName) || !isSafeGitHubPathPart(repoName)) {
+    throw apiError(400, "invalid_repository_name", "GitHubリポジトリ名の形式が不正です。");
+  }
+
+  return {
+    githubRepoId: "",
+    ownerName,
+    repoName,
+  };
+}
+
+function isSafeGitHubPathPart(value) {
+  return /^[A-Za-z0-9_.-]+$/.test(value);
 }
 
 async function supabaseFetch(pathname, options = {}) {
@@ -487,6 +776,46 @@ function isAuthConfigured() {
 function redirect(res, location) {
   res.writeHead(302, { Location: location });
   res.end();
+}
+
+async function readJsonBody(req) {
+  const chunks = [];
+  let totalBytes = 0;
+
+  for await (const chunk of req) {
+    totalBytes += chunk.length;
+    if (totalBytes > 1024 * 32) {
+      throw apiError(413, "request_too_large", "Request body is too large.");
+    }
+    chunks.push(chunk);
+  }
+
+  if (chunks.length === 0) return {};
+
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch (error) {
+    throw apiError(400, "invalid_json", "JSON body is invalid.");
+  }
+}
+
+function apiError(status, code, message) {
+  const error = new Error(message);
+  error.status = status;
+  error.code = code;
+  return error;
+}
+
+function handleApiError(req, res, error) {
+  if (error.status === 401) {
+    clearSessionCookies(res, req);
+  }
+
+  const status = Number(error.status || 500);
+  sendJson(res, status, {
+    error: error.code || "request_failed",
+    message: error.message || "Request failed.",
+  });
 }
 
 function sendJson(res, status, body) {

@@ -7,7 +7,7 @@ const state = {
   loggedIn: false,
   user: null,
   view: initialRoute.view,
-  selectedRepoId: "repo-1",
+  selectedRepoId: initialRoute.repoId || null,
   selectedSprintId: "sprint-1",
   selectedAnalyticsSprintId: "sprint-1",
   draggedIssueId: null,
@@ -16,31 +16,20 @@ const state = {
   sprintDialogOpen: false,
   taskDialogOpen: false,
   pointDialogOpen: false,
+  repoLoading: false,
+  repoLoadError: null,
+  repoDialogOpen: false,
+  repoSaveBusy: false,
+  repoSaveError: null,
+  githubRepoLoading: false,
+  githubRepoLoadError: null,
+  availableGithubRepos: [],
+  repoForm: {
+    github_repo_id: "",
+  },
 };
 
-const repositories = [
-  {
-    id: "repo-1",
-    repo_name: "AgileLens",
-    owner_name: "product-lab",
-    hourly_wage: 5000,
-    point_unit_price: 12000,
-  },
-  {
-    id: "repo-2",
-    repo_name: "DesignOps",
-    owner_name: "studio-team",
-    hourly_wage: 4500,
-    point_unit_price: 10000,
-  },
-  {
-    id: "repo-3",
-    repo_name: "DocsHub",
-    owner_name: "content-team",
-    hourly_wage: 4200,
-    point_unit_price: 9000,
-  },
-];
+let repositories = [];
 
 const sprints = [
   {
@@ -138,7 +127,7 @@ const evmData = [
 const app = document.querySelector("#app");
 
 function currentRepo() {
-  return repositories.find((repo) => repo.id === state.selectedRepoId);
+  return repositories.find((repo) => repo.id === state.selectedRepoId) || repositories[0] || null;
 }
 
 function repoSprints() {
@@ -154,6 +143,12 @@ function currentSprint() {
 }
 
 function ensureSprintSelection() {
+  const repo = currentRepo();
+  if (!repo) return;
+
+  state.selectedRepoId = repo.id;
+  ensureDefaultSprint(repo.id);
+
   const sprint = currentSprint();
   if (sprint) {
     state.selectedSprintId = sprint.id;
@@ -166,8 +161,26 @@ function ensureSprintSelection() {
   }
 }
 
+function ensureDefaultSprint(repoId) {
+  if (sprints.some((sprint) => sprint.repository_id === repoId)) return;
+
+  const startDate = new Date().toISOString().slice(0, 10);
+  sprints.push({
+    id: `local-sprint-${repoId}`,
+    repository_id: repoId,
+    title: "Sprint 1",
+    start_date: startDate,
+    due_on: calculateDueDate(startDate, 14),
+    cycle_days: 14,
+  });
+}
+
 function routeTo(view) {
   state.view = view;
+  if (!state.selectedRepoId) {
+    render();
+    return;
+  }
   window.location.hash = `/projects/${state.selectedRepoId}/${view}`;
   render();
 }
@@ -194,8 +207,8 @@ function render() {
           <div class="header-project">
             <button class="menu-button" data-action="toggle-sidebar" aria-label="サイドバーを開く">☰</button>
             <div class="project-title">
-              <h2>${repo.repo_name}</h2>
-              <span>${repo.owner_name}/${repo.repo_name}</span>
+              <h2>${repo ? escapeHtml(repo.repo_name) : "リポジトリ未登録"}</h2>
+              <span>${repo ? escapeHtml(repo.full_name || `${repo.owner_name}/${repo.repo_name}`) : "GitHub repository"}</span>
             </div>
           </div>
           <div class="header-actions">
@@ -207,11 +220,12 @@ function render() {
           </div>
         </header>
         <section class="content">
-          ${state.view === "analytics" ? renderAnalytics() : renderBoard()}
+          ${repo ? (state.view === "analytics" ? renderAnalytics() : renderBoard()) : renderRepositoryEmptyState()}
         </section>
       </main>
     </div>
     <div id="toast" class="toast hidden"></div>
+    ${state.repoDialogOpen ? renderRepositoryDialog() : ""}
   `;
 
   bindDashboardEvents();
@@ -276,6 +290,72 @@ function renderUserMenu() {
   `;
 }
 
+function renderRepositoryEmptyState() {
+  return `
+    <section class="empty-state">
+      <div class="empty-state-mark">＋</div>
+      <h3>リポジトリを追加してください</h3>
+      <p>GitHubリポジトリを登録すると、サイドバーからプロジェクトを切り替えられます。</p>
+      <button class="primary-button" data-action="open-repo-dialog">リポジトリ追加</button>
+      ${state.repoLoadError ? `<p class="form-error">${escapeHtml(state.repoLoadError)}</p>` : ""}
+    </section>
+  `;
+}
+
+function renderRepositoryDialog() {
+  const selectableRepos = state.availableGithubRepos.filter((repo) => !repo.registered);
+  const selectedRepoId =
+    state.repoForm.github_repo_id || (selectableRepos[0] ? selectableRepos[0].id : "");
+
+  return `
+    <div class="modal-backdrop" data-action="close-repo-dialog">
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="repo-dialog-title">
+        <div class="modal-header">
+          <h3 id="repo-dialog-title">リポジトリ追加</h3>
+          <button class="icon-button modal-close" data-action="close-repo-dialog" aria-label="閉じる">×</button>
+        </div>
+        <div class="modal-body">
+          ${
+            state.githubRepoLoading
+              ? '<div class="repo-loading">GitHubリポジトリを読み込んでいます</div>'
+              : `
+                <div class="repo-form">
+                  <div class="field repo-full-name-field">
+                    <label for="repo-github-id">GitHubリポジトリ</label>
+                    <select id="repo-github-id" data-repo-field="github_repo_id" ${selectableRepos.length === 0 ? "disabled" : ""}>
+                      ${
+                        state.availableGithubRepos.length === 0
+                          ? '<option value="">選択できるリポジトリがありません</option>'
+                          : state.availableGithubRepos
+                              .map(
+                                (repo) => `
+                                  <option value="${escapeHtml(repo.id)}" ${repo.id === selectedRepoId ? "selected" : ""} ${repo.registered ? "disabled" : ""}>
+                                    ${escapeHtml(repo.full_name)}${repo.private ? " / private" : ""}${repo.registered ? " / 登録済み" : ""}
+                                  </option>
+                                `,
+                              )
+                              .join("")
+                      }
+                    </select>
+                  </div>
+                </div>
+              `
+          }
+          <p class="form-note">時給とポイント単価は追加後に設定します。</p>
+          ${state.githubRepoLoadError ? `<p class="form-error">${escapeHtml(state.githubRepoLoadError)}</p>` : ""}
+          ${state.repoSaveError ? `<p class="form-error">${escapeHtml(state.repoSaveError)}</p>` : ""}
+        </div>
+        <div class="modal-footer">
+          <button class="secondary-button" data-action="close-repo-dialog" ${state.repoSaveBusy ? "disabled" : ""}>キャンセル</button>
+          <button class="primary-button" data-action="create-repo" ${state.repoSaveBusy || state.githubRepoLoading || selectableRepos.length === 0 ? "disabled" : ""}>
+            ${state.repoSaveBusy ? "追加中" : "追加"}
+          </button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function renderSidebar() {
   return `
     <aside class="sidebar">
@@ -287,22 +367,26 @@ function renderSidebar() {
         <div class="sidebar-subtitle">GitHub repositories</div>
       </div>
       <nav class="repo-list" aria-label="プロジェクト一覧">
-        ${repositories
-          .map(
-            (repo) => `
+        ${
+          repositories.length === 0
+            ? '<div class="repo-empty">リポジトリ未登録</div>'
+            : repositories
+                .map(
+                  (repo) => `
               <button class="repo-button ${repo.id === state.selectedRepoId ? "active" : ""}" data-repo-id="${repo.id}">
-                <span class="repo-icon">${repo.repo_name.slice(0, 2).toUpperCase()}</span>
+                <span class="repo-icon">${escapeHtml(repo.repo_name.slice(0, 2).toUpperCase())}</span>
                 <span>
-                  <span class="repo-name">${repo.repo_name}</span>
-                  <span class="repo-owner">${repo.owner_name}</span>
+                  <span class="repo-name">${escapeHtml(repo.repo_name)}</span>
+                  <span class="repo-owner">${escapeHtml(repo.owner_name)}</span>
                 </span>
               </button>
             `,
-          )
-          .join("")}
+                )
+                .join("")
+        }
       </nav>
       <div class="sidebar-footer">
-        <button class="add-repo-button" data-action="add-repo">＋ リポジトリ追加</button>
+        <button class="add-repo-button" data-action="open-repo-dialog">＋ リポジトリ追加</button>
       </div>
     </aside>
   `;
@@ -675,6 +759,7 @@ function bindDashboardEvents() {
   document.querySelectorAll("[data-repo-id]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedRepoId = button.dataset.repoId;
+      ensureDefaultSprint(state.selectedRepoId);
       const nextSprint = sprints.find((sprint) => sprint.repository_id === state.selectedRepoId);
       if (nextSprint) {
         state.selectedSprintId = nextSprint.id;
@@ -732,7 +817,6 @@ function bindDashboardEvents() {
   }
 
   const actionMap = {
-    "add-repo": "リポジトリ追加フロー: CLAUDE.md解析とIssue自動生成を開始します",
     "save-hours": "本日の稼働時間を登録し、ACスナップショットを更新しました",
   };
 
@@ -758,6 +842,28 @@ function bindDashboardEvents() {
       render();
     });
   }
+
+  document.querySelectorAll("[data-action='open-repo-dialog']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.repoDialogOpen = true;
+      state.repoSaveError = null;
+      state.githubRepoLoadError = null;
+      state.githubRepoLoading = true;
+      state.sidebarOpen = false;
+      render();
+      await loadGithubRepositories();
+    });
+  });
+
+  document.querySelectorAll("[data-action='close-repo-dialog']").forEach((element) => {
+    element.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (state.repoSaveBusy) return;
+      state.repoDialogOpen = false;
+      state.repoSaveError = null;
+      render();
+    });
+  });
 
   const openSprintDialog = document.querySelector("[data-action='open-sprint-dialog']");
   if (openSprintDialog) {
@@ -804,6 +910,13 @@ function bindDashboardEvents() {
   if (modal) {
     modal.addEventListener("click", (event) => {
       event.stopPropagation();
+    });
+  }
+
+  const createRepoButton = document.querySelector("[data-action='create-repo']");
+  if (createRepoButton) {
+    createRepoButton.addEventListener("click", async () => {
+      await createRepository();
     });
   }
 
@@ -902,9 +1015,11 @@ function escapeHtml(value) {
 
 function parseRoute() {
   const hash = window.location.hash || "";
+  const projectMatch = hash.match(/^#\/projects\/([^/]+)\/(board|analytics)/);
   return {
     isLogin: hash.startsWith("#/login"),
-    view: hash.includes("analytics") ? "analytics" : "board",
+    repoId: projectMatch ? decodeURIComponent(projectMatch[1]) : null,
+    view: projectMatch ? projectMatch[2] : hash.includes("analytics") ? "analytics" : "board",
   };
 }
 
@@ -919,6 +1034,142 @@ function loginErrorMessage() {
   };
 
   return error ? messages[error] || "ログインに失敗しました。もう一度試してください。" : "";
+}
+
+async function loadRepositories() {
+  state.repoLoading = true;
+  state.repoLoadError = null;
+
+  try {
+    const data = await apiRequest("/api/repositories");
+    repositories = data.repositories || [];
+    selectRepositoryFromRoute();
+  } catch (error) {
+    repositories = [];
+    state.selectedRepoId = null;
+    state.repoLoadError = error.message;
+  } finally {
+    state.repoLoading = false;
+  }
+}
+
+async function loadGithubRepositories() {
+  state.githubRepoLoading = true;
+  state.githubRepoLoadError = null;
+  render();
+
+  try {
+    const data = await apiRequest("/api/github/repositories");
+    state.availableGithubRepos = data.repositories || [];
+    const firstSelectable = state.availableGithubRepos.find((repo) => !repo.registered);
+    state.repoForm.github_repo_id = firstSelectable ? firstSelectable.id : "";
+  } catch (error) {
+    state.availableGithubRepos = [];
+    state.repoForm.github_repo_id = "";
+    state.githubRepoLoadError = error.message;
+  } finally {
+    state.githubRepoLoading = false;
+    render();
+  }
+}
+
+function selectRepositoryFromRoute() {
+  const route = parseRoute();
+  const routedRepo = route.repoId
+    ? repositories.find((repo) => repo.id === route.repoId)
+    : null;
+  const selectedRepo = repositories.find((repo) => repo.id === state.selectedRepoId);
+  const nextRepo = routedRepo || selectedRepo || repositories[0] || null;
+
+  state.selectedRepoId = nextRepo ? nextRepo.id : null;
+  if (nextRepo) {
+    ensureDefaultSprint(nextRepo.id);
+    const nextSprint = sprints.find((sprint) => sprint.repository_id === nextRepo.id);
+    if (nextSprint) {
+      state.selectedSprintId = nextSprint.id;
+      state.selectedAnalyticsSprintId = nextSprint.id;
+    }
+  }
+}
+
+async function createRepository() {
+  const selectedRepoId = document.querySelector("[data-repo-field='github_repo_id']")?.value || "";
+
+  state.repoForm = {
+    github_repo_id: selectedRepoId,
+  };
+
+  if (!selectedRepoId) {
+    state.repoSaveError = "追加するGitHubリポジトリを選択してください。";
+    render();
+    return;
+  }
+
+  state.repoSaveBusy = true;
+  state.repoSaveError = null;
+  render();
+
+  try {
+    const data = await apiRequest("/api/repositories", {
+      method: "POST",
+      body: {
+        github_repo_id: selectedRepoId,
+      },
+    });
+    const repository = data.repository;
+    upsertRepository(repository);
+    state.selectedRepoId = repository.id;
+    ensureDefaultSprint(repository.id);
+    const sprint = sprints.find((item) => item.repository_id === repository.id);
+    if (sprint) {
+      state.selectedSprintId = sprint.id;
+      state.selectedAnalyticsSprintId = sprint.id;
+    }
+    state.repoDialogOpen = false;
+    state.repoSaveBusy = false;
+    state.repoSaveError = null;
+    state.repoForm = {
+      github_repo_id: "",
+    };
+    state.availableGithubRepos = state.availableGithubRepos.map((repo) =>
+      repo.id === String(repository.github_repo_id) ? { ...repo, registered: true } : repo,
+    );
+    window.location.hash = `/projects/${repository.id}/board`;
+    render();
+    showToast(`${repository.owner_name}/${repository.repo_name} を追加しました`);
+  } catch (error) {
+    state.repoSaveBusy = false;
+    state.repoSaveError = error.message;
+    render();
+  }
+}
+
+function upsertRepository(repository) {
+  const existingIndex = repositories.findIndex((item) => item.id === repository.id);
+  if (existingIndex >= 0) {
+    repositories[existingIndex] = repository;
+    return;
+  }
+  repositories.push(repository);
+}
+
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method || "GET",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(data.message || "APIリクエストに失敗しました。");
+  }
+
+  return data;
 }
 
 async function initAuth() {
@@ -938,6 +1189,9 @@ async function initAuth() {
     state.authError = state.authConfigured
       ? null
       : "Supabase URLとAnon Keyを.envに設定してください。";
+    if (state.loggedIn) {
+      await loadRepositories();
+    }
   } catch (error) {
     state.authConfigured = true;
     state.loggedIn = false;
@@ -953,7 +1207,16 @@ async function initAuth() {
       return;
     }
 
-    if (state.loggedIn && latestRoute.isLogin) {
+    if (state.loggedIn && latestRoute.isLogin && state.selectedRepoId) {
+      window.location.hash = `/projects/${state.selectedRepoId}/${state.view}`;
+      return;
+    }
+
+    if (
+      state.loggedIn &&
+      state.selectedRepoId &&
+      (!latestRoute.repoId || latestRoute.repoId !== state.selectedRepoId)
+    ) {
       window.location.hash = `/projects/${state.selectedRepoId}/${state.view}`;
       return;
     }
@@ -982,6 +1245,13 @@ window.addEventListener("hashchange", () => {
   if (!state.authChecking && !state.loggedIn && !route.isLogin) {
     window.location.hash = "/login";
     return;
+  }
+  if (state.loggedIn && route.repoId) {
+    const repo = repositories.find((item) => item.id === route.repoId);
+    if (repo) {
+      state.selectedRepoId = repo.id;
+      ensureDefaultSprint(repo.id);
+    }
   }
   render();
 });

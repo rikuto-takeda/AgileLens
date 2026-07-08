@@ -181,6 +181,16 @@ button {
   padding: 14px 10px;
 }
 
+.repo-empty {
+  padding: 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
 .repo-button {
   width: 100%;
   display: grid;
@@ -435,6 +445,12 @@ button {
   background: var(--surface);
   border: 1px solid var(--line);
   color: var(--text);
+}
+
+.primary-button:disabled,
+.secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .board {
@@ -696,6 +712,49 @@ button {
   align-items: end;
 }
 
+.repo-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(120px, 0.7fr) minmax(120px, 0.7fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.repo-full-name-field {
+  min-width: 0;
+  grid-column: 1 / -1;
+}
+
+.form-error {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(184, 77, 68, 0.22);
+  border-radius: 7px;
+  background: rgba(184, 77, 68, 0.08);
+  color: var(--red);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.form-note {
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.repo-loading {
+  min-height: 88px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .task-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 96px 120px;
@@ -812,6 +871,41 @@ button {
 
 .metric-bad {
   color: var(--red);
+}
+
+.empty-state {
+  min-height: calc(100vh - 150px);
+  display: grid;
+  place-items: center;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 32px;
+  text-align: center;
+}
+
+.empty-state-mark {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 28px;
+  font-weight: 800;
+}
+
+.empty-state h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.empty-state p {
+  max-width: 440px;
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.6;
 }
 
 .chart-wrap {
@@ -976,7 +1070,8 @@ button {
   }
 
   .toolbar-actions,
-  .sprint-form {
+  .sprint-form,
+  .repo-form {
     display: grid;
     grid-template-columns: 1fr;
   }
@@ -1082,6 +1177,7 @@ button {
   .toolbar-actions,
   .form-row,
   .sprint-form,
+  .repo-form,
   .task-form,
   .summary-grid {
     display: grid;
