@@ -15,6 +15,8 @@ const state = {
   sidebarOpen: false,
   taskDialogOpen: false,
   estimateDialogOpen: false,
+  deleteDialogOpen: false,
+  deleteIssueId: null,
   repoLoading: false,
   repoLoadError: null,
   repoDialogOpen: false,
@@ -223,7 +225,7 @@ function renderLogin() {
         <div class="brand">
           <div class="brand-mark">AL</div>
           <h1 id="login-title">AgileLens</h1>
-          <p>GitHub IssueをカンバンとEVMで可視化するMVPダッシュボード</p>
+          <p>GitHub IssueをアジャイルボードとEVMで可視化するMVPダッシュボード</p>
         </div>
         ${loginError ? `<p class="login-message">${loginError}</p>` : ""}
         <button class="github-button" data-action="login" ${disabled ? "disabled" : ""}>
@@ -429,6 +431,7 @@ function renderBoard() {
     </div>
     ${state.taskDialogOpen ? renderTaskDialog() : ""}
     ${state.estimateDialogOpen ? renderEstimateDialog() : ""}
+    ${state.deleteDialogOpen ? renderDeleteTaskDialog() : ""}
   `;
 }
 
@@ -458,12 +461,12 @@ function renderTaskDialog() {
               <input id="task-title" type="text" placeholder="例: EVM計算ロジックを実装する" data-task-field="title" />
             </div>
             <div class="field">
-              <label for="task-assignee">担当者</label>
-              <input id="task-assignee" type="text" value="AK" maxlength="3" data-task-field="assignee" />
-            </div>
-            <div class="field">
               <label for="task-estimated-hours">見積時間</label>
               <input id="task-estimated-hours" type="number" min="0" max="999" step="0.25" value="${defaultEstimatedHours}" data-task-field="estimated_hours" />
+            </div>
+            <div class="field task-description-field">
+              <label for="task-description">詳細</label>
+              <textarea id="task-description" rows="5" placeholder="タスクの背景、完了条件、補足メモなど" data-task-field="description"></textarea>
             </div>
           </div>
         </div>
@@ -513,6 +516,32 @@ function renderEstimateDialog() {
   `;
 }
 
+function renderDeleteTaskDialog() {
+  const issue = issues.find((item) => item.id === state.deleteIssueId);
+  if (!issue) return "";
+
+  return `
+    <div class="modal-backdrop" data-action="close-delete-dialog">
+      <section class="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
+        <div class="modal-header">
+          <h3 id="delete-dialog-title">タスク削除</h3>
+          <button class="icon-button modal-close" data-action="close-delete-dialog" aria-label="閉じる">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="dialog-task-title">${escapeHtml(issue.title)}</p>
+          <p class="confirm-message">このタスクを削除します。よろしいですか？</p>
+        </div>
+        <div class="modal-footer">
+          <button class="secondary-button" data-action="close-delete-dialog">キャンセル</button>
+          <button class="danger-button" data-action="confirm-delete-task" ${state.issueSaveBusy ? "disabled" : ""}>
+            ${state.issueSaveBusy ? "削除中" : "削除"}
+          </button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function formatShortDate(dateText) {
   const date = new Date(`${dateText}T00:00:00`);
   return `${date.getMonth() + 1}/${date.getDate()}`;
@@ -554,15 +583,24 @@ function calculateDueDate(startDate, cycleDays) {
 
 function renderIssueCard(issue) {
   const assignee = issue.assignee || issue.assignee_username || "NA";
-  const context = issue.task_context || (issue.source === "claude" ? "CLAUDE" : assignee);
+  const context = issue.task_context || (issue.source === "claude" ? "CLAUDE" : assignee === "NA" ? "" : assignee);
   const contextClass = contextBadgeClass(context);
   const estimatedHours = Number(issue.estimated_hours ?? defaultEstimatedHours);
 
   return `
     <article class="issue-card" draggable="true" data-issue-id="${issue.id}">
+      <button type="button" class="issue-delete-button" data-action="open-delete-dialog" data-issue-id="${issue.id}" aria-label="${escapeHtml(issue.title)}を削除" title="削除">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 6h18"></path>
+          <path d="M8 6V4h8v2"></path>
+          <path d="M6 6l1 15h10l1-15"></path>
+          <path d="M10 11v6"></path>
+          <path d="M14 11v6"></path>
+        </svg>
+      </button>
       <p class="issue-title">${escapeHtml(issue.title)}</p>
       <div class="issue-meta">
-        <span class="context-badge ${contextClass}" title="${escapeHtml(context)}">${escapeHtml(context)}</span>
+        ${context ? `<span class="context-badge ${contextClass}" title="${escapeHtml(context)}">${escapeHtml(context)}</span>` : "<span></span>"}
         <span class="estimate-pill">${formatHours(estimatedHours)}h</span>
       </div>
     </article>
@@ -600,11 +638,7 @@ function renderAnalytics() {
           <p>プロジェクト全体のPV/EV/ACを可視化します。</p>
         </div>
       </div>
-      <div class="evm-dashboard-row">
-        ${renderEvmControlRow(summary, repo)}
-        ${renderEvmWorkingHoursTable(summary)}
-        ${renderEvmSummaryPanel(summary)}
-      </div>
+      ${renderEvmSummaryPanel(summary)}
       ${state.evmError ? `<p class="form-error board-message">${escapeHtml(state.evmError)}</p>` : ""}
       <section class="panel">
         <div class="panel-header">
@@ -623,6 +657,10 @@ function renderAnalytics() {
           </div>
         </div>
       </section>
+      <div class="evm-dashboard-row">
+        ${renderEvmControlRow(summary, repo)}
+        ${renderEvmWorkingHoursTable(summary)}
+      </div>
     </div>
   `;
 }
@@ -896,6 +934,18 @@ function bindDashboardEvents() {
     });
   });
 
+  document.querySelectorAll("[data-action='open-delete-dialog']").forEach((button) => {
+    button.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+    });
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.deleteIssueId = button.dataset.issueId;
+      state.deleteDialogOpen = true;
+      render();
+    });
+  });
+
   document.querySelectorAll(".column").forEach((column) => {
     column.addEventListener("dragover", (event) => event.preventDefault());
     column.addEventListener("drop", async () => {
@@ -1022,6 +1072,16 @@ function bindDashboardEvents() {
     });
   });
 
+  document.querySelectorAll("[data-action='close-delete-dialog']").forEach((element) => {
+    element.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (state.issueSaveBusy) return;
+      state.deleteDialogOpen = false;
+      state.deleteIssueId = null;
+      render();
+    });
+  });
+
   const modal = document.querySelector(".modal");
   if (modal) {
     modal.addEventListener("click", (event) => {
@@ -1057,17 +1117,27 @@ function bindDashboardEvents() {
     });
   }
 
+  const deleteTaskButton = document.querySelector("[data-action='confirm-delete-task']");
+  if (deleteTaskButton) {
+    deleteTaskButton.addEventListener("click", async () => {
+      await deleteSelectedTask();
+    });
+  }
+
   const taskTitleInput = document.querySelector("[data-task-field='title']");
+  const taskDescriptionInput = document.querySelector("[data-task-field='description']");
   const taskEstimatedHoursInput = document.querySelector("[data-task-field='estimated_hours']");
   if (taskTitleInput && taskEstimatedHoursInput) {
     let estimateTouched = false;
     taskEstimatedHoursInput.addEventListener("input", () => {
       estimateTouched = true;
     });
-    taskTitleInput.addEventListener("input", () => {
+    const updateEstimatedHours = () => {
       if (estimateTouched) return;
-      taskEstimatedHoursInput.value = formatHours(estimateTaskHours(taskTitleInput.value));
-    });
+      taskEstimatedHoursInput.value = formatHours(estimateTaskHours(taskTitleInput.value, taskDescriptionInput?.value || ""));
+    };
+    taskTitleInput.addEventListener("input", updateEstimatedHours);
+    taskDescriptionInput?.addEventListener("input", updateEstimatedHours);
   }
 
   const saveEstimateButton = document.querySelector("[data-action='save-estimate']");
@@ -1589,11 +1659,11 @@ async function createManualTask() {
   if (!state.selectedRepoId) return;
 
   const title = document.querySelector("[data-task-field='title']")?.value.trim() || "";
-  const assignee = document.querySelector("[data-task-field='assignee']")?.value.trim() || "NA";
+  const description = document.querySelector("[data-task-field='description']")?.value.trim() || title;
   const estimatedHoursInput = document.querySelector("[data-task-field='estimated_hours']");
   const estimatedHours = estimatedHoursInput?.value
-    ? normalizeEstimatedHours(estimatedHoursInput.value, estimateTaskHours(title))
-    : estimateTaskHours(title);
+    ? normalizeEstimatedHours(estimatedHoursInput.value, estimateTaskHours(title, description))
+    : estimateTaskHours(title, description);
 
   if (!title) {
     showToast("Issueタイトルを入力してください");
@@ -1610,8 +1680,7 @@ async function createManualTask() {
         method: "POST",
         body: {
           title,
-          description: title,
-          assignee_username: assignee.slice(0, 32),
+          description,
           estimated_hours: estimatedHours,
           kanban_column: "Backlog",
         },
@@ -1627,6 +1696,32 @@ async function createManualTask() {
     showToast("タスクをDBに保存しました");
   } catch (error) {
     state.taskSaveBusy = false;
+    render();
+    showToast(error.message);
+  }
+}
+
+async function deleteSelectedTask() {
+  if (!state.selectedRepoId || !state.deleteIssueId) return;
+
+  const issue = issues.find((item) => item.id === state.deleteIssueId);
+  if (!issue) return;
+
+  state.issueSaveBusy = true;
+  render();
+
+  try {
+    await deleteIssue(issue.id);
+    issues = issues.filter((item) => item.id !== issue.id);
+    state.issueSaveBusy = false;
+    state.deleteDialogOpen = false;
+    state.deleteIssueId = null;
+    state.estimateDialogOpen = false;
+    state.selectedIssueId = null;
+    render();
+    showToast("タスクを削除しました");
+  } catch (error) {
+    state.issueSaveBusy = false;
     render();
     showToast(error.message);
   }
@@ -1702,6 +1797,15 @@ async function updateIssue(issueId, body) {
     {
       method: "PATCH",
       body,
+    },
+  );
+}
+
+async function deleteIssue(issueId) {
+  return apiRequest(
+    `/api/repositories/${encodeURIComponent(state.selectedRepoId)}/issues/${encodeURIComponent(issueId)}`,
+    {
+      method: "DELETE",
     },
   );
 }

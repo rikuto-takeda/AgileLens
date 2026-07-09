@@ -115,6 +115,15 @@ const server = http.createServer(async (req, res) => {
       );
       return;
     }
+    if (req.method === "DELETE" && issueMatch) {
+      await handleDeleteIssue(
+        req,
+        res,
+        decodeURIComponent(issueMatch[1]),
+        decodeURIComponent(issueMatch[2]),
+      );
+      return;
+    }
 
     const generateTasksMatch = url.pathname.match(
       /^\/api\/repositories\/([^/]+)\/generate-claude-tasks$/,
@@ -423,6 +432,18 @@ async function handleUpdateIssue(req, res, repositoryId, issueId) {
     const issue = await updateIssue(accessToken, repositoryId, issueId, input);
 
     sendJson(res, 200, { issue });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleDeleteIssue(req, res, repositoryId, issueId) {
+  try {
+    const { accessToken } = await getAuthenticatedContext(req, res);
+    await getRepositoryById(accessToken, repositoryId);
+    await deleteIssue(accessToken, repositoryId, issueId);
+
+    sendJson(res, 200, { deleted: true, issue_id: issueId });
   } catch (error) {
     handleApiError(req, res, error);
   }
@@ -1345,6 +1366,28 @@ async function updateIssueRow(accessToken, repositoryId, issueId, input) {
       body: payload,
     },
   );
+}
+
+async function deleteIssue(accessToken, repositoryId, issueId) {
+  const rows = await supabaseFetch(
+    `/rest/v1/issues?id=eq.${encodeURIComponent(issueId)}&repository_id=eq.${encodeURIComponent(
+      repositoryId,
+    )}&select=id`,
+    {
+      method: "DELETE",
+      accessToken,
+      headers: {
+        Prefer: "return=representation",
+      },
+    },
+  );
+
+  const deletedIssue = Array.isArray(rows) ? rows[0] : rows;
+  if (!deletedIssue) {
+    throw apiError(404, "issue_not_found", "タスクが見つかりません。");
+  }
+
+  return deletedIssue;
 }
 
 async function getIssueLabels(accessToken, repositoryId, issueId) {
