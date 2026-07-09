@@ -1781,7 +1781,7 @@ async function initAuth() {
     state.authConfigured = true;
     state.loggedIn = false;
     state.user = null;
-    state.authError = "認証サーバーに接続できませんでした。";
+    state.authError = null;
   } finally {
     state.authChecking = false;
     state.loginBusy = false;
