@@ -1358,7 +1358,9 @@ async function updateIssueRow(accessToken, repositoryId, issueId, input) {
   if (input.kanbanColumn !== undefined) {
     payload.kanban_column = input.kanbanColumn;
     payload.state = input.kanbanColumn === "Done" ? "closed" : "open";
-    payload.closed_at = input.kanbanColumn === "Done" ? new Date().toISOString() : null;
+    if (input.kanbanColumn === "Done" && !input.preserveCompletionTime) {
+      payload.closed_at = new Date().toISOString();
+    }
     labels = upsertIssueLabel(await getCurrentLabels(), { name: manualKanbanColumnLabel });
     payload.labels = labels;
   }
@@ -1677,13 +1679,18 @@ function buildIssueProgressUpdates(issues, signals) {
     if (issue.kanban_column === "Done" && decision.kanbanColumn !== "Done") return;
 
     const nextState = decision.kanbanColumn === "Done" ? "closed" : "open";
-    if (issue.kanban_column === decision.kanbanColumn && issue.state === nextState) return;
+    const nextClosedAt =
+      decision.kanbanColumn === "Done" ? decision.closedAt || signals.syncedAt : undefined;
+    const columnUnchanged = issue.kanban_column === decision.kanbanColumn && issue.state === nextState;
+    const completionTimeUnchanged =
+      nextClosedAt === undefined || new Date(issue.closed_at || 0).getTime() === new Date(nextClosedAt).getTime();
+    if (columnUnchanged && completionTimeUnchanged) return;
 
     updates.push({
       id: issue.id,
       kanban_column: decision.kanbanColumn,
       state: nextState,
-      closed_at: decision.kanbanColumn === "Done" ? decision.closedAt || signals.syncedAt : undefined,
+      closed_at: nextClosedAt,
       synced_at: signals.syncedAt,
     });
   });
@@ -1692,42 +1699,34 @@ function buildIssueProgressUpdates(issues, signals) {
 }
 
 function decideIssueProgress(issue, signals) {
-  if (
-    issue.github_issue_number &&
-    signals.closedIssueNumbers.has(Number(issue.github_issue_number))
-  ) {
+  const matcher = createIssueProgressMatcher(issue);
+  const completionDates = [];
+  if (issue.github_issue_number && signals.closedIssueNumbers.has(Number(issue.github_issue_number))) {
     const closedIssue = signals.closedIssues.find(
       (item) => Number(item.number) === Number(issue.github_issue_number),
     );
-    return {
-      kanbanColumn: "Done",
-      closedAt: closedIssue?.closedAt || signals.syncedAt,
-    };
+    if (closedIssue?.closedAt) completionDates.push(closedIssue.closedAt);
   }
 
-  const matcher = createIssueProgressMatcher(issue);
   const matchedClosedIssue = signals.closedIssues.find((closedIssue) =>
     matcher.matches(closedIssue.searchText),
   );
-
-  if (matchedClosedIssue) {
-    return {
-      kanbanColumn: "Done",
-      closedAt: matchedClosedIssue.closedAt || signals.syncedAt,
-    };
-  }
+  if (matchedClosedIssue?.closedAt) completionDates.push(matchedClosedIssue.closedAt);
 
   const messageMatchedCommits = signals.commits.filter((commit) => matcher.matches(commit.searchText));
   const codeMatchedCommits = signals.commits.filter((commit) =>
     matcher.matchesCode(commit.codeSearchText),
   );
-  const matchedCommits = uniqueProgressCommits([...messageMatchedCommits, ...codeMatchedCommits]);
+  const matchedCommits = uniqueProgressCommits([...messageMatchedCommits, ...codeMatchedCommits]).sort(
+    (a, b) => new Date(b.date || 0) - new Date(a.date || 0),
+  );
   const defaultMatchedCommit = matchedCommits.find((commit) => commit.onDefault);
+  if (defaultMatchedCommit?.date) completionDates.push(defaultMatchedCommit.date);
 
-  if (defaultMatchedCommit) {
+  if (completionDates.length > 0) {
     return {
       kanbanColumn: "Done",
-      closedAt: defaultMatchedCommit.date || signals.syncedAt,
+      closedAt: latestDateTime(completionDates) || signals.syncedAt,
     };
   }
 
@@ -1738,6 +1737,14 @@ function decideIssueProgress(issue, signals) {
   }
 
   return null;
+}
+
+function latestDateTime(values) {
+  return values.reduce((latest, value) => {
+    const timestamp = new Date(value || 0).getTime();
+    if (!Number.isFinite(timestamp)) return latest;
+    return !latest || timestamp > new Date(latest).getTime() ? value : latest;
+  }, "");
 }
 
 function uniqueProgressCommits(commits) {
@@ -2861,6 +2868,7 @@ function normalizeIssueUpdateInput(body) {
 
   if (body.kanban_column !== undefined) {
     input.kanbanColumn = normalizeKanbanColumn(body.kanban_column);
+    input.preserveCompletionTime = body.preserve_completion_time === true;
   }
 
   if (body.estimated_hours !== undefined || body.estimatedHours !== undefined) {

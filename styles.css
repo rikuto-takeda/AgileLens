@@ -756,8 +756,14 @@ button {
 }
 
 .estimate-pill {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+  background: rgba(47, 111, 178, 0.13);
+  color: var(--blue);
+}
+
+.estimate-pill.completion-pill {
+  background: rgba(43, 122, 75, 0.14);
+  color: var(--green);
+  white-space: nowrap;
 }
 
 .analytics-grid {
@@ -1058,6 +1064,14 @@ button {
   align-items: end;
 }
 
+.field-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .task-title-field {
   min-width: 0;
 }
@@ -1132,6 +1146,68 @@ button {
 
 .task-name-edit-field {
   margin-bottom: 14px;
+}
+
+.task-time-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.completion-time-value {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface-muted);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.completion-confirm-actions {
+  gap: 10px;
+}
+
+.completion-time-comparison {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.completion-time-comparison > div {
+  min-width: 0;
+  padding: 12px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  text-align: center;
+}
+
+.completion-time-comparison strong,
+.completion-time-comparison span {
+  display: block;
+}
+
+.completion-time-comparison strong {
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.completion-time-comparison > div span {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.completion-time-arrow {
+  color: var(--accent-strong);
+  font-size: 24px;
+  font-weight: 800;
 }
 
 .confirm-modal {

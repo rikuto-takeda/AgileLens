@@ -486,6 +486,7 @@ function renderEstimateDialog() {
   if (!issue) return "";
   const description = issue.description || "詳細は未登録です。";
   const estimatedHours = Number(issue.estimated_hours ?? defaultEstimatedHours);
+  const completionTime = isCompletedIssue(issue) ? formatCompletionDateTime(issue.closed_at) : "－－";
 
   return `
     <div class="modal-backdrop" data-action="close-estimate-dialog">
@@ -503,9 +504,15 @@ function renderEstimateDialog() {
             <span>詳細</span>
             <p>${escapeHtml(description)}</p>
           </div>
-          <div class="field">
-            <label for="edit-estimated-hours">見積時間</label>
-            <input id="edit-estimated-hours" type="number" min="0" max="999" step="0.25" value="${estimatedHours}" data-estimate-field="estimated_hours" />
+          <div class="task-time-fields">
+            <div class="field">
+              <label for="edit-estimated-hours">見積時間</label>
+              <input id="edit-estimated-hours" type="number" min="0" max="999" step="0.25" value="${estimatedHours}" data-estimate-field="estimated_hours" />
+            </div>
+            <div class="field">
+              <span class="field-label">完了時間</span>
+              <div class="completion-time-value">${escapeHtml(completionTime)}</div>
+            </div>
           </div>
         </div>
         <div class="modal-footer">
@@ -589,6 +596,10 @@ function renderIssueCard(issue) {
   const context = issue.task_context || (issue.source === "claude" ? "CLAUDE" : assignee === "NA" ? "" : assignee);
   const contextClass = contextBadgeClass(context);
   const estimatedHours = Number(issue.estimated_hours ?? defaultEstimatedHours);
+  const completed = isCompletedIssue(issue);
+  const timeLabel = completed
+    ? `完了 ${formatCardCompletionDateTime(issue.closed_at)}`
+    : `${formatHours(estimatedHours)}h`;
 
   return `
     <article class="issue-card" draggable="true" data-issue-id="${issue.id}">
@@ -604,7 +615,7 @@ function renderIssueCard(issue) {
       <p class="issue-title">${escapeHtml(issue.title)}</p>
       <div class="issue-meta">
         ${context ? `<span class="context-badge ${contextClass}" title="${escapeHtml(context)}">${escapeHtml(context)}</span>` : "<span></span>"}
-        <span class="estimate-pill">${formatHours(estimatedHours)}h</span>
+        <span class="estimate-pill ${completed ? "completion-pill" : ""}">${escapeHtml(timeLabel)}</span>
       </div>
     </article>
   `;
@@ -666,6 +677,35 @@ function renderAnalytics() {
       </div>
     </div>
   `;
+}
+
+function formatCompletionDateTime(dateText) {
+  const date = new Date(dateText);
+  if (!dateText || Number.isNaN(date.getTime())) return "－－";
+
+  return new Intl.DateTimeFormat("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatCardCompletionDateTime(dateText) {
+  const date = new Date(dateText);
+  if (!dateText || Number.isNaN(date.getTime())) return "－－";
+
+  return new Intl.DateTimeFormat("ja-JP", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function isCompletedIssue(issue) {
+  return issue?.kanban_column === "Done" || issue?.state === "closed";
 }
 
 function renderEvmSummaryPanel(summary) {
@@ -979,12 +1019,21 @@ function bindDashboardEvents() {
         return;
       }
 
+      let preserveCompletionTime = false;
+      if (nextColumn === "Done" && previousColumn !== "Done" && issue.closed_at) {
+        const updateCompletionTime = await confirmCompletionTimeUpdate(issue.closed_at);
+        preserveCompletionTime = !updateCompletionTime;
+      }
+
       issue.kanban_column = nextColumn;
       state.draggedIssueId = null;
       render();
 
       try {
-        const data = await updateIssue(issue.id, { kanban_column: nextColumn });
+        const data = await updateIssue(issue.id, {
+          kanban_column: nextColumn,
+          preserve_completion_time: preserveCompletionTime,
+        });
         mergeIssue(data.issue, { preserveDisplayTitle: true });
         render();
         showToast(`タスク位置を ${column.dataset.columnLabel} に保存しました`);
@@ -1728,6 +1777,72 @@ async function createManualTask() {
     render();
     showToast(error.message);
   }
+}
+
+function confirmCompletionTimeUpdate(previousCompletionTime) {
+  return new Promise((resolve) => {
+    document.querySelector("[data-completion-confirm]")?.remove();
+    const currentCompletionTime = new Date().toISOString();
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.dataset.completionConfirm = "true";
+    backdrop.innerHTML = `
+      <section class="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="completion-confirm-title">
+        <div class="modal-header">
+          <h3 id="completion-confirm-title">完了時間を変更しますか？</h3>
+        </div>
+        <div class="modal-body">
+          <div class="completion-time-comparison">
+            <div>
+              <strong>${escapeHtml(formatCompletionComparisonDateTime(previousCompletionTime))}</strong>
+              <span>以前の完了時間</span>
+            </div>
+            <span class="completion-time-arrow" aria-hidden="true">→</span>
+            <div>
+              <strong>${escapeHtml(formatCompletionComparisonDateTime(currentCompletionTime))}</strong>
+              <span>今回の完了時間</span>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer completion-confirm-actions">
+          <button class="secondary-button" type="button" data-completion-choice="previous">変更しない</button>
+          <button class="primary-button" type="button" data-completion-choice="current">変更する</button>
+        </div>
+      </section>
+    `;
+
+    const finish = (useCurrentTime) => {
+      document.removeEventListener("keydown", handleKeydown);
+      backdrop.remove();
+      resolve(useCurrentTime);
+    };
+    const handleKeydown = (event) => {
+      if (event.key === "Escape") finish(false);
+    };
+
+    backdrop.querySelector("[data-completion-choice='previous']").addEventListener("click", () => finish(false));
+    backdrop.querySelector("[data-completion-choice='current']").addEventListener("click", () => finish(true));
+    document.addEventListener("keydown", handleKeydown);
+    document.body.appendChild(backdrop);
+    backdrop.querySelector("[data-completion-choice='current']").focus();
+  });
+}
+
+function formatCompletionComparisonDateTime(dateText) {
+  const date = new Date(dateText);
+  if (!dateText || Number.isNaN(date.getTime())) return "－－";
+
+  const parts = new Intl.DateTimeFormat("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const value = (type) => parts.find((part) => part.type === type)?.value || "00";
+  return `${value("year")}/${value("month")}/${value("day")}/${value("hour")}:${value("minute")}`;
 }
 
 async function deleteSelectedTask() {
