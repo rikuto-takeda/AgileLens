@@ -16,6 +16,8 @@ const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
 const githubScopes = process.env.GITHUB_OAUTH_SCOPES || "repo read:user user:email";
 const defaultEstimatedHours = 0.5;
 const manualEstimatedHoursLabel = "estimated-hours-manual";
+const manualTaskTitleLabel = "task-title-manual";
+const manualKanbanColumnLabel = "kanban-column-manual";
 
 const cookies = {
   access: "agilelens_access",
@@ -1338,19 +1340,33 @@ async function updateIssue(accessToken, repositoryId, issueId, input) {
 
 async function updateIssueRow(accessToken, repositoryId, issueId, input) {
   const payload = {};
+  let labels;
+
+  const getCurrentLabels = async () => {
+    if (!labels) {
+      labels = await getIssueLabels(accessToken, repositoryId, issueId);
+    }
+    return labels;
+  };
+
+  if (input.title !== undefined) {
+    payload.title = input.title;
+    labels = upsertIssueLabel(await getCurrentLabels(), { name: manualTaskTitleLabel });
+    payload.labels = labels;
+  }
 
   if (input.kanbanColumn !== undefined) {
     payload.kanban_column = input.kanbanColumn;
     payload.state = input.kanbanColumn === "Done" ? "closed" : "open";
     payload.closed_at = input.kanbanColumn === "Done" ? new Date().toISOString() : null;
+    labels = upsertIssueLabel(await getCurrentLabels(), { name: manualKanbanColumnLabel });
+    payload.labels = labels;
   }
 
   if (input.estimatedHours !== undefined) {
     payload.estimated_hours = input.estimatedHours;
-    payload.labels = upsertIssueLabel(
-      await getIssueLabels(accessToken, repositoryId, issueId),
-      { name: manualEstimatedHoursLabel },
-    );
+    labels = upsertIssueLabel(await getCurrentLabels(), { name: manualEstimatedHoursLabel });
+    payload.labels = labels;
   }
 
   return supabaseFetch(
@@ -1652,6 +1668,8 @@ function buildIssueProgressUpdates(issues, signals) {
   let matchedCount = 0;
 
   issues.forEach((issue) => {
+    if (hasIssueLabel(issue.labels, manualKanbanColumnLabel)) return;
+
     const decision = decideIssueProgress(issue, signals);
     if (!decision) return;
 
@@ -2168,17 +2186,26 @@ function applyClaudeTaskDisplayTitles(issues, claudeTasks) {
 
     const description = issue.description || issue.title;
     const matchedTask = tasksByDetail.get(normalizeComparableTask(description));
+    const hasManualTitle = hasIssueLabel(issue.labels, manualTaskTitleLabel);
 
     if (matchedTask) {
       return {
         ...issue,
-        title: matchedTask.title,
+        title: hasManualTitle ? issue.title : matchedTask.title,
         description,
         task_context: matchedTask.contextLabel,
       };
     }
 
     const titleBase = makeContextTaskTitle("", description);
+    if (hasManualTitle) {
+      return {
+        ...issue,
+        description,
+        task_context: getFallbackTaskContext(description),
+      };
+    }
+
     const mappedIssue = {
       ...issue,
       title: titleBase,
@@ -2823,6 +2850,14 @@ function normalizeManualIssueInput(body) {
 
 function normalizeIssueUpdateInput(body) {
   const input = {};
+
+  if (body.title !== undefined) {
+    const title = stringValue(body.title).trim();
+    if (!title) {
+      throw apiError(400, "invalid_issue_title", "タスク名を入力してください。");
+    }
+    input.title = title.slice(0, 240);
+  }
 
   if (body.kanban_column !== undefined) {
     input.kanbanColumn = normalizeKanbanColumn(body.kanban_column);

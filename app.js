@@ -495,7 +495,10 @@ function renderEstimateDialog() {
           <button class="icon-button modal-close" data-action="close-estimate-dialog" aria-label="閉じる">×</button>
         </div>
         <div class="modal-body">
-          <p class="dialog-task-title">${escapeHtml(issue.title)}</p>
+          <div class="field task-name-edit-field">
+            <label for="edit-task-title">タスク名</label>
+            <input id="edit-task-title" type="text" maxlength="240" value="${escapeHtml(issue.title)}" data-estimate-field="title" />
+          </div>
           <div class="task-detail-block">
             <span>詳細</span>
             <p>${escapeHtml(description)}</p>
@@ -927,6 +930,12 @@ function bindDashboardEvents() {
     card.addEventListener("dragstart", () => {
       state.draggedIssueId = card.dataset.issueId;
     });
+    card.addEventListener("dragend", () => {
+      state.draggedIssueId = null;
+      document.querySelectorAll(".column.is-drag-over").forEach((column) => {
+        column.classList.remove("is-drag-over");
+      });
+    });
     card.addEventListener("click", () => {
       state.selectedIssueId = card.dataset.issueId;
       state.estimateDialogOpen = true;
@@ -947,8 +956,20 @@ function bindDashboardEvents() {
   });
 
   document.querySelectorAll(".column").forEach((column) => {
-    column.addEventListener("dragover", (event) => event.preventDefault());
-    column.addEventListener("drop", async () => {
+    column.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      if (state.draggedIssueId) {
+        column.classList.add("is-drag-over");
+      }
+    });
+    column.addEventListener("dragleave", (event) => {
+      if (!column.contains(event.relatedTarget)) {
+        column.classList.remove("is-drag-over");
+      }
+    });
+    column.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      column.classList.remove("is-drag-over");
       const issue = issues.find((item) => item.id === state.draggedIssueId);
       if (!issue) return;
       const previousColumn = issue.kanban_column;
@@ -964,7 +985,7 @@ function bindDashboardEvents() {
 
       try {
         const data = await updateIssue(issue.id, { kanban_column: nextColumn });
-        mergeIssue(data.issue);
+        mergeIssue(data.issue, { preserveDisplayTitle: true });
         render();
         showToast(`タスク位置を ${column.dataset.columnLabel} に保存しました`);
       } catch (error) {
@@ -1146,23 +1167,31 @@ function bindDashboardEvents() {
       const issue = issues.find((item) => item.id === state.selectedIssueId);
       if (!issue) return;
 
+      const title = document.querySelector("[data-estimate-field='title']").value.trim();
+      if (!title) {
+        showToast("タスク名を入力してください");
+        return;
+      }
       const estimatedHours = normalizeEstimatedHours(
         document.querySelector("[data-estimate-field='estimated_hours']").value,
       );
+      const previousTitle = issue.title;
       const previousEstimatedHours = issue.estimated_hours;
+      issue.title = title;
       issue.estimated_hours = estimatedHours;
       state.issueSaveBusy = true;
       render();
 
       try {
-        const data = await updateIssue(issue.id, { estimated_hours: estimatedHours });
+        const data = await updateIssue(issue.id, { title, estimated_hours: estimatedHours });
         mergeIssue(data.issue);
         state.issueSaveBusy = false;
         state.estimateDialogOpen = false;
         state.selectedIssueId = null;
         render();
-        showToast("見積時間をDBに保存しました");
+        showToast("タスク名と見積時間をDBに保存しました");
       } catch (error) {
+        issue.title = previousTitle;
         issue.estimated_hours = previousEstimatedHours;
         state.issueSaveBusy = false;
         render();
@@ -1810,7 +1839,7 @@ async function deleteIssue(issueId) {
   );
 }
 
-function mergeIssue(updatedIssue) {
+function mergeIssue(updatedIssue, options = {}) {
   if (!updatedIssue) return;
 
   const index = issues.findIndex((issue) => issue.id === updatedIssue.id);
@@ -1823,7 +1852,9 @@ function mergeIssue(updatedIssue) {
   issues[index] = {
     ...existingIssue,
     ...updatedIssue,
-    title: updatedIssue.title || existingIssue.title,
+    title: options.preserveDisplayTitle
+      ? existingIssue.title
+      : updatedIssue.title || existingIssue.title,
     description: updatedIssue.description || existingIssue.description,
     task_context: updatedIssue.task_context || existingIssue.task_context,
   };

@@ -523,7 +523,7 @@ button {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
-  align-items: start;
+  align-items: stretch;
   width: 100%;
   min-width: 0;
 }
@@ -536,6 +536,11 @@ button {
   background: var(--surface-muted);
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+.column.is-drag-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .column-header {
@@ -1123,6 +1128,10 @@ button {
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: var(--shadow);
+}
+
+.task-name-edit-field {
+  margin-bottom: 14px;
 }
 
 .confirm-modal {
