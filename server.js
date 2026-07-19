@@ -18,6 +18,7 @@ const defaultEstimatedHours = 0.5;
 const manualEstimatedHoursLabel = "estimated-hours-manual";
 const manualTaskTitleLabel = "task-title-manual";
 const manualKanbanColumnLabel = "kanban-column-manual";
+const plannedCompletionDateLabel = "planned-completion-date";
 
 const cookies = {
   access: "agilelens_access",
@@ -115,6 +116,29 @@ const server = http.createServer(async (req, res) => {
         decodeURIComponent(issueMatch[1]),
         decodeURIComponent(issueMatch[2]),
       );
+      return;
+    }
+
+    const sprintsMatch = url.pathname.match(/^\/api\/repositories\/([^/]+)\/sprints$/);
+    if (req.method === "GET" && sprintsMatch) {
+      await handleListSprints(req, res, decodeURIComponent(sprintsMatch[1]));
+      return;
+    }
+
+    const sprintMatch = url.pathname.match(/^\/api\/repositories\/([^/]+)\/sprints\/([^/]+)$/);
+    if (req.method === "PATCH" && sprintMatch) {
+      await handleUpdateSprint(
+        req,
+        res,
+        decodeURIComponent(sprintMatch[1]),
+        decodeURIComponent(sprintMatch[2]),
+      );
+      return;
+    }
+
+    const sprintSettingsMatch = url.pathname.match(/^\/api\/repositories\/([^/]+)\/sprints-settings$/);
+    if (req.method === "PUT" && sprintSettingsMatch) {
+      await handleSaveSprintSettings(req, res, decodeURIComponent(sprintSettingsMatch[1]));
       return;
     }
     if (req.method === "DELETE" && issueMatch) {
@@ -434,6 +458,111 @@ async function handleUpdateIssue(req, res, repositoryId, issueId) {
     const issue = await updateIssue(accessToken, repositoryId, issueId, input);
 
     sendJson(res, 200, { issue });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleListSprints(req, res, repositoryId) {
+  try {
+    const { accessToken } = await getAuthenticatedContext(req, res);
+    const repository = await getRepositoryById(accessToken, repositoryId);
+    const existing = await listRepositorySprints(accessToken, repositoryId);
+    let repositorySprints = existing.length > 0
+      ? existing
+      : [await ensureRepositoryEvmSprint(accessToken, repository)];
+
+    const legacyDefault = repositorySprints.find((sprint) => sprint.title === "MVP EVM");
+    if (legacyDefault) {
+      const rows = await supabaseFetch(
+        `/rest/v1/sprints?id=eq.${encodeURIComponent(legacyDefault.id)}&repository_id=eq.${encodeURIComponent(repositoryId)}&select=${sprintSelectColumns()}`,
+        {
+          method: "PATCH",
+          accessToken,
+          headers: { Prefer: "return=representation" },
+          body: { title: "スプリント1" },
+        },
+      );
+      const renamed = Array.isArray(rows) ? rows[0] : rows;
+      if (renamed) {
+        repositorySprints = repositorySprints.map((sprint) =>
+          sprint.id === renamed.id ? renamed : sprint,
+        );
+      }
+    }
+
+    sendJson(res, 200, { sprints: repositorySprints });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleUpdateSprint(req, res, repositoryId, sprintId) {
+  try {
+    const { accessToken } = await getAuthenticatedContext(req, res);
+    await getRepositoryById(accessToken, repositoryId);
+    const input = normalizeSprintSettingsInput(await readJsonBody(req));
+    const rows = await supabaseFetch(
+      `/rest/v1/sprints?id=eq.${encodeURIComponent(sprintId)}&repository_id=eq.${encodeURIComponent(
+        repositoryId,
+      )}&select=${sprintSelectColumns()}`,
+      {
+        method: "PATCH",
+        accessToken,
+        headers: { Prefer: "return=representation" },
+        body: input,
+      },
+    );
+    const sprint = Array.isArray(rows) ? rows[0] : rows;
+    if (!sprint) throw apiError(404, "sprint_not_found", "スプリントが見つかりません。");
+    sendJson(res, 200, { sprint });
+  } catch (error) {
+    handleApiError(req, res, error);
+  }
+}
+
+async function handleSaveSprintSettings(req, res, repositoryId) {
+  try {
+    const { accessToken } = await getAuthenticatedContext(req, res);
+    await getRepositoryById(accessToken, repositoryId);
+    const input = normalizeSprintPlanInput(await readJsonBody(req));
+    const existing = await listRepositorySprints(accessToken, repositoryId);
+    const savedSprints = [];
+
+    for (let index = 0; index < input.sprints.length; index += 1) {
+      const sprint = input.sprints[index];
+      const payload = {
+        repository_id: repositoryId,
+        title: sprint.title,
+        start_date: sprint.startDate,
+        due_on: sprint.dueOn,
+        cycle_days: input.cycleDays,
+        state: "open",
+      };
+      const current = existing[index];
+      const rows = await supabaseFetch(
+        current
+          ? `/rest/v1/sprints?id=eq.${encodeURIComponent(current.id)}&repository_id=eq.${encodeURIComponent(repositoryId)}&select=${sprintSelectColumns()}`
+          : `/rest/v1/sprints?select=${sprintSelectColumns()}`,
+        {
+          method: current ? "PATCH" : "POST",
+          accessToken,
+          headers: { Prefer: "return=representation" },
+          body: payload,
+        },
+      );
+      const saved = Array.isArray(rows) ? rows[0] : rows;
+      if (saved) savedSprints.push(saved);
+    }
+
+    for (const obsolete of existing.slice(input.sprints.length)) {
+      await supabaseFetch(
+        `/rest/v1/sprints?id=eq.${encodeURIComponent(obsolete.id)}&repository_id=eq.${encodeURIComponent(repositoryId)}`,
+        { method: "DELETE", accessToken },
+      );
+    }
+
+    sendJson(res, 200, { sprints: savedSprints });
   } catch (error) {
     handleApiError(req, res, error);
   }
@@ -840,7 +969,7 @@ async function ensureRepositoryEvmSprint(accessToken, repository) {
       },
       body: {
         repository_id: repository.id,
-        title: "MVP EVM",
+        title: "スプリント1",
         start_date: startDate,
         due_on: addDays(startDate, 13),
         cycle_days: 14,
@@ -1368,6 +1497,17 @@ async function updateIssueRow(accessToken, repositoryId, issueId, input) {
   if (input.estimatedHours !== undefined) {
     payload.estimated_hours = input.estimatedHours;
     labels = upsertIssueLabel(await getCurrentLabels(), { name: manualEstimatedHoursLabel });
+    payload.labels = labels;
+  }
+
+  if (input.plannedCompletionDate !== undefined) {
+    const currentLabels = await getCurrentLabels();
+    labels = input.plannedCompletionDate
+      ? upsertIssueLabel(currentLabels, {
+          name: plannedCompletionDateLabel,
+          description: input.plannedCompletionDate,
+        })
+      : currentLabels.filter((label) => label?.name !== plannedCompletionDateLabel);
     payload.labels = labels;
   }
 
@@ -2166,6 +2306,7 @@ function normalizeIssueRow(row) {
   return {
     ...row,
     description,
+    planned_completion_date: getIssueLabelDescription(row.labels, plannedCompletionDateLabel),
     estimated_hours:
       row.source === "claude" && !hasIssueLabel(row.labels, manualEstimatedHoursLabel)
         ? defaultEstimatedHours
@@ -2250,7 +2391,11 @@ function getIssueDescriptionFromLabels(labels) {
   if (!Array.isArray(labels)) return "";
 
   const detailLabel = labels.find(
-    (label) => label && typeof label === "object" && typeof label.description === "string",
+    (label) =>
+      label &&
+      typeof label === "object" &&
+      label.name !== plannedCompletionDateLabel &&
+      typeof label.description === "string",
   );
   return detailLabel?.description || "";
 }
@@ -2259,9 +2404,16 @@ function hasIssueLabel(labels, name) {
   return Array.isArray(labels) && labels.some((label) => label?.name === name);
 }
 
+function getIssueLabelDescription(labels, name) {
+  if (!Array.isArray(labels)) return null;
+  return labels.find((label) => label?.name === name)?.description || null;
+}
+
 function upsertIssueLabel(labels, nextLabel) {
   const safeLabels = Array.isArray(labels) ? labels.filter((label) => label && typeof label === "object") : [];
-  if (hasIssueLabel(safeLabels, nextLabel.name)) return safeLabels;
+  if (hasIssueLabel(safeLabels, nextLabel.name)) {
+    return safeLabels.map((label) => label.name === nextLabel.name ? { ...label, ...nextLabel } : label);
+  }
   return [...safeLabels, nextLabel];
 }
 
@@ -2878,11 +3030,73 @@ function normalizeIssueUpdateInput(body) {
     );
   }
 
+  if (body.planned_completion_date !== undefined || body.plannedCompletionDate !== undefined) {
+    input.plannedCompletionDate = normalizeOptionalDate(
+      body.planned_completion_date ?? body.plannedCompletionDate,
+    );
+  }
+
   if (Object.keys(input).length === 0) {
     throw apiError(400, "empty_issue_update", "更新するタスク情報がありません。");
   }
 
   return input;
+}
+
+function normalizeSprintSettingsInput(body) {
+  const cycleDays = Number(body.cycle_days);
+  if (!Number.isInteger(cycleDays) || cycleDays < 1 || cycleDays > 365) {
+    throw apiError(400, "invalid_sprint_cycle_days", "スプリント単位は1日以上365日以下で入力してください。");
+  }
+  const input = { cycle_days: cycleDays };
+  const startDate = stringValue(body.start_date).trim();
+  if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+    input.due_on = addDays(startDate, cycleDays - 1);
+  }
+  return input;
+}
+
+function normalizeOptionalDate(value) {
+  if (value === null || value === "") return null;
+  const dateText = stringValue(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateText)) return dateText;
+  const date = new Date(dateText);
+  if (Number.isNaN(date.getTime())) {
+    throw apiError(400, "invalid_planned_completion_date", "完了予定日を正しく入力してください。");
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function normalizeSprintPlanInput(body) {
+  const startDate = stringValue(body.start_date).trim();
+  const endDate = stringValue(body.end_date).trim();
+  const cycleDays = Number(body.cycle_days);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    throw apiError(400, "invalid_sprint_period", "開始日と終了日を入力してください。");
+  }
+  if (startDate > endDate) {
+    throw apiError(400, "invalid_sprint_period", "終了日は開始日以降にしてください。");
+  }
+  if (!Number.isInteger(cycleDays) || cycleDays < 1 || cycleDays > 365) {
+    throw apiError(400, "invalid_sprint_cycle_days", "スプリント単位は1日以上365日以下で入力してください。");
+  }
+
+  const totalDays = Math.floor((new Date(`${endDate}T00:00:00Z`) - new Date(`${startDate}T00:00:00Z`)) / 86400000) + 1;
+  const sprintCount = Math.ceil(totalDays / cycleDays);
+  if (sprintCount > 100) {
+    throw apiError(400, "too_many_sprints", "作成できるスプリントは100件までです。");
+  }
+  const names = Array.isArray(body.sprint_names) ? body.sprint_names : [];
+  const sprints = Array.from({ length: sprintCount }, (_, index) => {
+    const sprintStart = addDays(startDate, index * cycleDays);
+    const calculatedDueOn = addDays(sprintStart, cycleDays - 1);
+    return {
+      title: stringValue(names[index]).trim().slice(0, 240) || `スプリント${index + 1}`,
+      startDate: sprintStart,
+      dueOn: calculatedDueOn > endDate ? endDate : calculatedDueOn,
+    };
+  });
+  return { cycleDays, sprints };
 }
 
 function normalizeKanbanColumn(value) {

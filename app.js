@@ -8,7 +8,7 @@ const state = {
   user: null,
   view: initialRoute.view,
   selectedRepoId: initialRoute.repoId || null,
-  selectedSprintId: "sprint-1",
+  selectedSprintId: "all",
   selectedAnalyticsSprintId: "sprint-1",
   draggedIssueId: null,
   selectedIssueId: null,
@@ -44,6 +44,11 @@ const state = {
   evmToday: null,
   claudeTaskGenerating: false,
   claudeTaskError: null,
+  sprintSettingsOpen: false,
+  sprintSettingsSaving: false,
+  sprintSettingsError: null,
+  sprintSettingsId: null,
+  sprintPlan: null,
   repoForm: {
     github_repo_id: "",
   },
@@ -117,7 +122,12 @@ function ensureSprintSelection() {
 
   const sprint = currentSprint();
   if (sprint) {
-    state.selectedSprintId = sprint.id;
+    if (
+      state.selectedSprintId !== "all" &&
+      !repoSprints().some((item) => item.id === state.selectedSprintId)
+    ) {
+      state.selectedSprintId = "all";
+    }
     if (
       state.selectedAnalyticsSprintId !== "all" &&
       !repoSprints().some((item) => item.id === state.selectedAnalyticsSprintId)
@@ -372,7 +382,11 @@ function renderSidebar() {
 }
 
 function renderBoard() {
-  const repoIssues = issues.filter((issue) => issue.repository_id === state.selectedRepoId);
+  const repoIssues = issues.filter((issue) => {
+    if (issue.repository_id !== state.selectedRepoId) return false;
+    if (state.selectedSprintId === "all") return true;
+    return issue.sprint_id === state.selectedSprintId;
+  });
   const columns = [
     { key: "Backlog", label: "未着手" },
     { key: "In Progress", label: "処理中" },
@@ -384,20 +398,35 @@ function renderBoard() {
       <div>
         <h3>アジャイルボード</h3>
         <p>GitHub Issueを3カラムで同期管理します。</p>
+        ${renderProgressSyncMeta()}
       </div>
       <div class="toolbar-actions">
-        <button class="secondary-button" data-action="sync-progress" ${state.progressSyncing ? "disabled" : ""}>
-          ${state.progressSyncing ? "同期中" : "GitHub進捗同期"}
-        </button>
-        <button class="secondary-button" data-action="generate-claude-tasks" ${state.claudeTaskGenerating ? "disabled" : ""}>
-          ${state.claudeTaskGenerating ? "生成中" : "CLAUDE.mdから生成"}
-        </button>
+        <div class="board-sprint-control">
+          <div class="board-action-buttons">
+            <button class="secondary-button" data-action="sync-progress" ${state.progressSyncing ? "disabled" : ""}>
+              ${state.progressSyncing ? "同期中" : "GitHub進捗同期"}
+            </button>
+            <button class="secondary-button" data-action="generate-claude-tasks" ${state.claudeTaskGenerating ? "disabled" : ""}>
+              ${state.claudeTaskGenerating ? "生成中" : "CLAUDE.mdから生成"}
+            </button>
+            <button class="secondary-button sprint-settings-button" data-action="open-sprint-settings">設定</button>
+          </div>
+          <label for="board-sprint-select">表示するスプリント</label>
+          <select id="board-sprint-select" data-board-sprint-select>
+            <option value="all" ${state.selectedSprintId === "all" ? "selected" : ""}>すべてのタスク</option>
+            ${repoSprints()
+              .map(
+                (sprint) =>
+                  `<option value="${escapeHtml(sprint.id)}" ${state.selectedSprintId === sprint.id ? "selected" : ""}>${escapeHtml(sprint.title)}</option>`,
+              )
+              .join("")}
+          </select>
+        </div>
       </div>
     </div>
     ${state.issuesLoadError ? `<p class="form-error board-message">${escapeHtml(state.issuesLoadError)}</p>` : ""}
     ${state.progressSyncError ? `<p class="form-error board-message">${escapeHtml(state.progressSyncError)}</p>` : ""}
     ${state.claudeTaskError ? `<p class="form-error board-message">${escapeHtml(state.claudeTaskError)}</p>` : ""}
-    ${renderProgressSyncMeta()}
     <div class="board">
       ${columns
         .map((column) => {
@@ -432,6 +461,60 @@ function renderBoard() {
     ${state.taskDialogOpen ? renderTaskDialog() : ""}
     ${state.estimateDialogOpen ? renderEstimateDialog() : ""}
     ${state.deleteDialogOpen ? renderDeleteTaskDialog() : ""}
+    ${state.sprintSettingsOpen ? renderSprintSettingsDialog() : ""}
+  `;
+}
+
+function renderSprintSettingsDialog() {
+  const availableSprints = repoSprints();
+  if (!state.sprintPlan) state.sprintPlan = createSprintPlan(availableSprints);
+  const plan = state.sprintPlan;
+  const plannedSprints = calculateSprintPlanItems(plan);
+
+  return `
+    <div class="modal-backdrop" data-action="close-sprint-settings">
+      <section class="modal sprint-settings-modal" role="dialog" aria-modal="true" aria-labelledby="sprint-settings-title">
+        <div class="modal-header">
+          <h3 id="sprint-settings-title">スプリント単位設定</h3>
+          <button class="icon-button modal-close" data-action="close-sprint-settings" aria-label="閉じる">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="sprint-settings-form">
+            <div class="field">
+              <label for="settings-start-date">開始日</label>
+              <input id="settings-start-date" type="date" value="${escapeHtml(plan.start_date)}" data-sprint-plan-field="start_date" />
+            </div>
+            <div class="field">
+              <label for="settings-end-date">終了日</label>
+              <input id="settings-end-date" type="date" value="${escapeHtml(plan.end_date)}" data-sprint-plan-field="end_date" />
+            </div>
+            <div class="field">
+              <label for="settings-cycle-days">スプリント単位（日数）</label>
+              <input id="settings-cycle-days" type="number" min="1" max="365" step="1" value="${plan.cycle_days}" data-sprint-plan-field="cycle_days" />
+            </div>
+          </div>
+          <div class="sprint-count-summary">自動計算されたスプリント数：<strong>${plannedSprints.length}</strong></div>
+          <div class="sprint-name-settings">
+            <span class="field-label">スプリント名の変更</span>
+            ${plannedSprints
+              .map(
+                (sprint, index) => `
+                  <div class="sprint-name-row">
+                    <input type="text" maxlength="240" value="${escapeHtml(sprint.title)}" data-sprint-name-index="${index}" />
+                    <span>${escapeHtml(sprint.start_date)} ～ ${escapeHtml(sprint.due_on)}</span>
+                  </div>
+                `,
+              )
+              .join("")}
+          </div>
+          ${state.sprintSettingsError ? `<p class="form-error">${escapeHtml(state.sprintSettingsError)}</p>` : ""}
+        </div>
+        <div class="modal-footer">
+          <button class="secondary-button" data-action="close-sprint-settings" ${state.sprintSettingsSaving ? "disabled" : ""}>キャンセル</button>
+          <button class="primary-button" data-action="save-sprint-settings" ${state.sprintSettingsSaving ? "disabled" : ""}>${state.sprintSettingsSaving ? "保存中" : "保存"}</button>
+        </div>
+      </section>
+    </div>
   `;
 }
 
@@ -486,6 +569,7 @@ function renderEstimateDialog() {
   if (!issue) return "";
   const description = issue.description || "詳細は未登録です。";
   const estimatedHours = Number(issue.estimated_hours ?? defaultEstimatedHours);
+  const plannedCompletionDate = formatDateInputValue(issue.planned_completion_date);
   const completionTime = isCompletedIssue(issue) ? formatCompletionDateTime(issue.closed_at) : "－－";
 
   return `
@@ -496,9 +580,18 @@ function renderEstimateDialog() {
           <button class="icon-button modal-close" data-action="close-estimate-dialog" aria-label="閉じる">×</button>
         </div>
         <div class="modal-body">
-          <div class="field task-name-edit-field">
-            <label for="edit-task-title">タスク名</label>
-            <input id="edit-task-title" type="text" maxlength="240" value="${escapeHtml(issue.title)}" data-estimate-field="title" />
+          <div class="task-name-fields">
+            <div class="field task-name-edit-field">
+              <label for="edit-task-title">タスク名</label>
+              <input id="edit-task-title" type="text" maxlength="240" value="${escapeHtml(issue.title)}" data-estimate-field="title" />
+            </div>
+            <div class="field task-estimate-edit-field">
+              <label for="edit-estimated-hours">見積時間</label>
+              <div class="hours-input-wrap">
+                <input id="edit-estimated-hours" type="number" min="0" max="999" step="0.25" value="${estimatedHours}" data-estimate-field="estimated_hours" />
+                <span>時間</span>
+              </div>
+            </div>
           </div>
           <div class="task-detail-block">
             <span>詳細</span>
@@ -506,8 +599,8 @@ function renderEstimateDialog() {
           </div>
           <div class="task-time-fields">
             <div class="field">
-              <label for="edit-estimated-hours">見積時間</label>
-              <input id="edit-estimated-hours" type="number" min="0" max="999" step="0.25" value="${estimatedHours}" data-estimate-field="estimated_hours" />
+              <label for="edit-planned-completion-date">完了予定日</label>
+              <input id="edit-planned-completion-date" type="date" value="${escapeHtml(plannedCompletionDate)}" data-estimate-field="planned_completion_date" />
             </div>
             <div class="field">
               <span class="field-label">完了時間</span>
@@ -677,6 +770,15 @@ function renderAnalytics() {
       </div>
     </div>
   `;
+}
+
+function formatDateInputValue(dateText) {
+  if (!dateText) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateText)) return dateText;
+  const date = new Date(dateText);
+  if (Number.isNaN(date.getTime())) return "";
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return localDate.toISOString().slice(0, 10);
 }
 
 function formatCompletionDateTime(dateText) {
@@ -948,7 +1050,7 @@ function bindDashboardEvents() {
       ensureDefaultSprint(state.selectedRepoId);
       const nextSprint = sprints.find((sprint) => sprint.repository_id === state.selectedRepoId);
       if (nextSprint) {
-        state.selectedSprintId = nextSprint.id;
+        state.selectedSprintId = "all";
         state.selectedAnalyticsSprintId = nextSprint.id;
       }
       state.issuesLoading = true;
@@ -1142,6 +1244,52 @@ function bindDashboardEvents() {
     });
   });
 
+  const boardSprintSelect = document.querySelector("[data-board-sprint-select]");
+  if (boardSprintSelect) {
+    boardSprintSelect.addEventListener("change", () => {
+      state.selectedSprintId = boardSprintSelect.value;
+      render();
+    });
+  }
+
+  const openSprintSettingsButton = document.querySelector("[data-action='open-sprint-settings']");
+  if (openSprintSettingsButton) {
+    openSprintSettingsButton.addEventListener("click", () => {
+      const selectedSprint = repoSprints().find((sprint) => sprint.id === state.selectedSprintId);
+      state.sprintSettingsId = selectedSprint?.id || repoSprints()[0]?.id || null;
+      state.sprintPlan = createSprintPlan(repoSprints());
+      state.sprintSettingsError = null;
+      state.sprintSettingsOpen = true;
+      render();
+    });
+  }
+
+  document.querySelectorAll("[data-action='close-sprint-settings']").forEach((element) => {
+    element.addEventListener("click", (event) => {
+      if (event.target !== element && element.classList.contains("modal-backdrop")) return;
+      if (state.sprintSettingsSaving) return;
+      state.sprintSettingsOpen = false;
+      state.sprintSettingsError = null;
+      state.sprintPlan = null;
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-sprint-plan-field]").forEach((input) => {
+    input.addEventListener("change", () => {
+      captureSprintPlanNames();
+      const field = input.dataset.sprintPlanField;
+      state.sprintPlan[field] = field === "cycle_days" ? Number(input.value) : input.value;
+      state.sprintSettingsError = null;
+      render();
+    });
+  });
+
+  const saveSprintSettingsButton = document.querySelector("[data-action='save-sprint-settings']");
+  if (saveSprintSettingsButton) {
+    saveSprintSettingsButton.addEventListener("click", saveSprintSettings);
+  }
+
   document.querySelectorAll("[data-action='close-delete-dialog']").forEach((element) => {
     element.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -1224,24 +1372,33 @@ function bindDashboardEvents() {
       const estimatedHours = normalizeEstimatedHours(
         document.querySelector("[data-estimate-field='estimated_hours']").value,
       );
+      const plannedCompletionInput = document.querySelector("[data-estimate-field='planned_completion_date']").value;
+      const plannedCompletionDate = plannedCompletionInput || null;
       const previousTitle = issue.title;
       const previousEstimatedHours = issue.estimated_hours;
+      const previousPlannedCompletionDate = issue.planned_completion_date;
       issue.title = title;
       issue.estimated_hours = estimatedHours;
+      issue.planned_completion_date = plannedCompletionDate;
       state.issueSaveBusy = true;
       render();
 
       try {
-        const data = await updateIssue(issue.id, { title, estimated_hours: estimatedHours });
+        const data = await updateIssue(issue.id, {
+          title,
+          estimated_hours: estimatedHours,
+          planned_completion_date: plannedCompletionDate,
+        });
         mergeIssue(data.issue);
         state.issueSaveBusy = false;
         state.estimateDialogOpen = false;
         state.selectedIssueId = null;
         render();
-        showToast("タスク名と見積時間をDBに保存しました");
+        showToast("タスク詳細を保存しました");
       } catch (error) {
         issue.title = previousTitle;
         issue.estimated_hours = previousEstimatedHours;
+        issue.planned_completion_date = previousPlannedCompletionDate;
         state.issueSaveBusy = false;
         render();
         showToast(error.message);
@@ -1330,6 +1487,7 @@ async function loadIssues(repositoryId = state.selectedRepoId) {
   state.progressSyncing = true;
 
   try {
+    await loadSprints(repositoryId);
     let data = null;
 
     try {
@@ -1614,7 +1772,7 @@ function selectRepositoryFromRoute() {
     ensureDefaultSprint(nextRepo.id);
     const nextSprint = sprints.find((sprint) => sprint.repository_id === nextRepo.id);
     if (nextSprint) {
-      state.selectedSprintId = nextSprint.id;
+      state.selectedSprintId = "all";
       state.selectedAnalyticsSprintId = nextSprint.id;
     }
   }
@@ -1650,7 +1808,7 @@ async function createRepository() {
     ensureDefaultSprint(repository.id);
     const sprint = sprints.find((item) => item.repository_id === repository.id);
     if (sprint) {
-      state.selectedSprintId = sprint.id;
+      state.selectedSprintId = "all";
       state.selectedAnalyticsSprintId = sprint.id;
     }
     state.repoDialogOpen = false;
@@ -1777,6 +1935,134 @@ async function createManualTask() {
     render();
     showToast(error.message);
   }
+}
+
+async function loadSprints(repositoryId = state.selectedRepoId) {
+  if (!repositoryId) return;
+
+  try {
+    const data = await apiRequest(`/api/repositories/${encodeURIComponent(repositoryId)}/sprints`);
+    const repositorySprints = Array.isArray(data.sprints) ? data.sprints : [];
+    for (let index = sprints.length - 1; index >= 0; index -= 1) {
+      if (sprints[index].repository_id === repositoryId) sprints.splice(index, 1);
+    }
+    sprints.push(...repositorySprints);
+    if (
+      state.selectedSprintId !== "all" &&
+      !repositorySprints.some((sprint) => sprint.id === state.selectedSprintId)
+    ) {
+      state.selectedSprintId = "all";
+    }
+  } catch (error) {
+    ensureDefaultSprint(repositoryId);
+  }
+}
+
+async function saveSprintSettings() {
+  captureSprintPlanNames();
+  const plan = state.sprintPlan;
+  const plannedSprints = calculateSprintPlanItems(plan);
+  if (!plan?.start_date || !plan?.end_date || plan.start_date > plan.end_date) {
+    state.sprintSettingsError = "終了日は開始日以降にしてください。";
+    render();
+    return;
+  }
+  if (!Number.isInteger(plan.cycle_days) || plan.cycle_days < 1 || plan.cycle_days > 365) {
+    state.sprintSettingsError = "スプリント単位は1日以上365日以下で入力してください。";
+    render();
+    return;
+  }
+  if (plannedSprints.length === 0 || plannedSprints.length > 100) {
+    state.sprintSettingsError = "作成できるスプリントは1件以上100件までです。";
+    render();
+    return;
+  }
+
+  state.sprintSettingsSaving = true;
+  state.sprintSettingsError = null;
+  render();
+
+  try {
+    const data = await apiRequest(
+      `/api/repositories/${encodeURIComponent(state.selectedRepoId)}/sprints-settings`,
+      {
+        method: "PUT",
+        body: {
+          start_date: plan.start_date,
+          end_date: plan.end_date,
+          cycle_days: plan.cycle_days,
+          sprint_names: plannedSprints.map((sprint) => sprint.title),
+        },
+      },
+    );
+    for (let index = sprints.length - 1; index >= 0; index -= 1) {
+      if (sprints[index].repository_id === state.selectedRepoId) sprints.splice(index, 1);
+    }
+    sprints.push(...(data.sprints || []));
+    state.sprintSettingsSaving = false;
+    state.sprintSettingsOpen = false;
+    state.sprintPlan = null;
+    if (
+      state.selectedSprintId !== "all" &&
+      !sprints.some((sprint) => sprint.id === state.selectedSprintId)
+    ) {
+      state.selectedSprintId = "all";
+    }
+    render();
+    showToast(`${data.sprints?.length || 0}件のスプリントを保存しました`);
+  } catch (error) {
+    state.sprintSettingsSaving = false;
+    state.sprintSettingsError = error.message;
+    render();
+  }
+}
+
+function createSprintPlan(availableSprints) {
+  const sorted = [...availableSprints].sort((a, b) => String(a.start_date).localeCompare(String(b.start_date)));
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  const today = new Date().toISOString().slice(0, 10);
+  return {
+    start_date: first?.start_date || today,
+    end_date: last?.due_on || addDaysToDate(first?.start_date || today, Number(first?.cycle_days || 14) - 1),
+    cycle_days: Number(first?.cycle_days || 14),
+    names: sorted.map((sprint, index) => sprint.title || `スプリント${index + 1}`),
+  };
+}
+
+function calculateSprintPlanItems(plan) {
+  if (!plan?.start_date || !plan?.end_date || plan.start_date > plan.end_date) return [];
+  const cycleDays = Number(plan.cycle_days);
+  if (!Number.isInteger(cycleDays) || cycleDays < 1) return [];
+  const start = new Date(`${plan.start_date}T00:00:00`);
+  const end = new Date(`${plan.end_date}T00:00:00`);
+  const totalDays = Math.floor((end - start) / 86400000) + 1;
+  const count = Math.min(100, Math.ceil(totalDays / cycleDays));
+  return Array.from({ length: count }, (_, index) => {
+    const sprintStart = addDaysToDate(plan.start_date, index * cycleDays);
+    const calculatedDueOn = addDaysToDate(sprintStart, cycleDays - 1);
+    return {
+      title: plan.names?.[index] || `スプリント${index + 1}`,
+      start_date: sprintStart,
+      due_on: calculatedDueOn > plan.end_date ? plan.end_date : calculatedDueOn,
+    };
+  });
+}
+
+function captureSprintPlanNames() {
+  if (!state.sprintPlan) return;
+  const names = [...(state.sprintPlan.names || [])];
+  document.querySelectorAll("[data-sprint-name-index]").forEach((input) => {
+    const index = Number(input.dataset.sprintNameIndex);
+    names[index] = input.value.trim() || `スプリント${index + 1}`;
+  });
+  state.sprintPlan.names = names;
+}
+
+function addDaysToDate(dateText, days) {
+  const date = new Date(`${dateText}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 function confirmCompletionTimeUpdate(previousCompletionTime) {

@@ -448,9 +448,9 @@ button {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   justify-content: start;
-  align-items: center;
+  align-items: start;
   gap: 16px;
-  margin-bottom: 18px;
+  margin-bottom: 6px;
 }
 
 .toolbar-actions {
@@ -467,6 +467,43 @@ button {
 .toolbar-actions .secondary-button {
   min-height: 40px;
   white-space: nowrap;
+}
+
+.board-sprint-control {
+  min-width: 500px;
+  display: grid;
+  gap: 4px;
+}
+
+.board-action-buttons {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 72px;
+  gap: 10px;
+}
+
+.sprint-settings-button {
+  width: 72px;
+}
+
+.board-action-buttons .secondary-button {
+  min-width: 0;
+}
+
+.board-sprint-control label {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.board-sprint-control select {
+  min-width: 0;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
 }
 
 .toolbar h3 {
@@ -1028,7 +1065,9 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: -6px 0 14px;
+  min-height: 18px;
+  justify-content: flex-start;
+  margin: 0;
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 800;
@@ -1036,6 +1075,10 @@ button {
 
 .board-sync-meta time {
   color: var(--text);
+}
+
+.toolbar > div:first-child .board-sync-meta {
+  margin-top: 20px;
 }
 
 .form-note {
@@ -1144,8 +1187,27 @@ button {
   box-shadow: var(--shadow);
 }
 
-.task-name-edit-field {
+.task-name-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(150px, 1fr);
+  gap: 12px;
   margin-bottom: 14px;
+}
+
+.hours-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hours-input-wrap input {
+  min-width: 0;
+}
+
+.hours-input-wrap span {
+  flex: none;
+  color: var(--text-muted);
+  font-size: 13px;
 }
 
 .task-time-fields {
@@ -1169,6 +1231,55 @@ button {
 
 .completion-confirm-actions {
   gap: 10px;
+}
+
+.sprint-settings-modal {
+  width: min(720px, 100%);
+}
+
+.sprint-settings-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(150px, 0.7fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.sprint-count-summary {
+  margin: 16px 0 12px;
+  padding: 10px 12px;
+  border-radius: 7px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.sprint-name-settings {
+  display: grid;
+  gap: 8px;
+}
+
+.sprint-name-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.sprint-name-row input {
+  min-width: 0;
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+}
+
+.sprint-name-row span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .completion-time-comparison {
@@ -1599,6 +1710,24 @@ button {
 }
 
 @media (max-width: 620px) {
+  .board-sprint-control {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .board-action-buttons {
+    grid-template-columns: 1fr;
+  }
+
+  .sprint-settings-form,
+  .sprint-name-row {
+    grid-template-columns: 1fr;
+  }
+
+  .sprint-name-row span {
+    white-space: normal;
+  }
+
   .header {
     gap: 12px;
     padding: 10px 12px;
@@ -1818,6 +1947,11 @@ button {
   .modal-close,
   .menu-button {
     width: 40px;
+  }
+
+  .task-name-fields,
+  .task-time-fields {
+    grid-template-columns: 1fr;
   }
 
   .panel-header,
