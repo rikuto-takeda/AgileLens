@@ -523,8 +523,8 @@ async function handleUpdateSprint(req, res, repositoryId, sprintId) {
 
 async function handleSaveSprintSettings(req, res, repositoryId) {
   try {
-    const { accessToken } = await getAuthenticatedContext(req, res);
-    await getRepositoryById(accessToken, repositoryId);
+    const { accessToken, user } = await getAuthenticatedContext(req, res);
+    const repository = await getRepositoryById(accessToken, repositoryId);
     const input = normalizeSprintPlanInput(await readJsonBody(req));
     const existing = await listRepositorySprints(accessToken, repositoryId);
     const savedSprints = [];
@@ -562,10 +562,122 @@ async function handleSaveSprintSettings(req, res, repositoryId) {
       );
     }
 
-    sendJson(res, 200, { sprints: savedSprints });
+    const issues = await listIssues(accessToken, repositoryId);
+    const profile = await getPrivateUserProfile(accessToken, user);
+    const claudeTasks = await getClaudeTasksForDisplay(repository, profile?.github_access_token);
+    const orderedIssueCandidates = applyClaudeTaskDisplayTitles(issues, claudeTasks);
+    const assignedIssues = await assignIssuesToSprints(
+      accessToken,
+      repositoryId,
+      orderedIssueCandidates,
+      savedSprints,
+    );
+
+    sendJson(res, 200, {
+      sprints: savedSprints,
+      issues: assignedIssues,
+      assigned_issue_count: assignedIssues.length,
+    });
   } catch (error) {
     handleApiError(req, res, error);
   }
+}
+
+async function assignIssuesToSprints(accessToken, repositoryId, issues, sprints) {
+  if (!Array.isArray(issues) || issues.length === 0 || !Array.isArray(sprints) || sprints.length === 0) {
+    return [];
+  }
+
+  const orderedIssues = [...issues].sort(compareIssuesForSprintAssignment);
+  const totalEstimatedHours = orderedIssues.reduce(
+    (total, issue) => total + normalizeNonNegativeNumber(issue.estimated_hours),
+    0,
+  );
+  const targetHours = totalEstimatedHours / sprints.length;
+  const assignments = distributeIssuesAcrossSprints(orderedIssues, sprints, targetHours);
+  const assignedIssues = [];
+
+  for (const { issue, sprint } of assignments) {
+    const labels = upsertIssueLabel(issue.labels, {
+      name: plannedCompletionDateLabel,
+      description: sprint.due_on,
+    });
+    const rows = await supabaseFetch(
+      `/rest/v1/issues?id=eq.${encodeURIComponent(issue.id)}&repository_id=eq.${encodeURIComponent(repositoryId)}&select=${issueSelectColumns()}`,
+      {
+        method: "PATCH",
+        accessToken,
+        headers: { Prefer: "return=representation" },
+        body: {
+          sprint_id: sprint.id,
+          labels,
+        },
+      },
+    );
+    const savedIssue = Array.isArray(rows) ? rows[0] : rows;
+    if (savedIssue) assignedIssues.push(normalizeIssueRow(savedIssue));
+  }
+
+  return assignedIssues;
+}
+
+function distributeIssuesAcrossSprints(issues, sprints, targetHours) {
+  if (targetHours <= 0) {
+    return issues.map((issue, index) => ({
+      issue,
+      sprint: sprints[Math.min(Math.floor(index * sprints.length / issues.length), sprints.length - 1)],
+    }));
+  }
+
+  const assignments = [];
+  let sprintIndex = 0;
+  let assignedHours = 0;
+
+  for (const issue of issues) {
+    const issueHours = normalizeNonNegativeNumber(issue.estimated_hours);
+    const canMoveToNextSprint = sprintIndex < sprints.length - 1 && assignedHours > 0;
+    const currentDifference = Math.abs(targetHours - assignedHours);
+    const addedDifference = Math.abs(targetHours - (assignedHours + issueHours));
+
+    if (canMoveToNextSprint && assignedHours + issueHours > targetHours && currentDifference <= addedDifference) {
+      sprintIndex += 1;
+      assignedHours = 0;
+    }
+
+    assignments.push({ issue, sprint: sprints[sprintIndex] });
+    assignedHours += issueHours;
+
+    if (sprintIndex < sprints.length - 1 && targetHours > 0 && assignedHours >= targetHours) {
+      sprintIndex += 1;
+      assignedHours = 0;
+    }
+  }
+
+  return assignments;
+}
+
+function compareIssuesForSprintAssignment(left, right) {
+  const priorityDifference = sprintAssignmentPriority(left) - sprintAssignmentPriority(right);
+  if (priorityDifference !== 0) return priorityDifference;
+  return String(left.created_at || "").localeCompare(String(right.created_at || ""));
+}
+
+function sprintAssignmentPriority(issue) {
+  const context = String(issue.task_context || "");
+  const contextMatch = context.match(/^\s*([1-4])(?:\s|\b)/);
+  if (contextMatch) return Number(contextMatch[1]) - 1;
+
+  const text = [issue.task_context, issue.title, issue.description]
+    .filter(Boolean)
+    .join(" ");
+  const rules = [
+    /(^|\s)1(?:\s|\b)|フロントエンド|画面|UI|ログイン|サイドバー|ヘッダー|アジャイルボード|アナリティクス/i,
+    /(^|\s)2(?:\s|\b)|データベース|テーブル|DB|RLS|UUID|index|repositories|issues|sprints/i,
+    /(^|\s)3(?:\s|\b)|バックエンド|処理フロー|連携|同期|GitHub API|EVM算出/i,
+    /(^|\s)4(?:\s|\b)|ロール|権限管理|権限|オーナー|コラボレーター/i,
+  ];
+  const matchedIndex = rules.findIndex((pattern) => pattern.test(text));
+  return matchedIndex === -1 ? rules.length : matchedIndex;
 }
 
 async function handleDeleteIssue(req, res, repositoryId, issueId) {

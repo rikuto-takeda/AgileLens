@@ -1999,6 +1999,7 @@ async function saveSprintSettings() {
       if (sprints[index].repository_id === state.selectedRepoId) sprints.splice(index, 1);
     }
     sprints.push(...(data.sprints || []));
+    (data.issues || []).forEach((issue) => mergeIssue(issue, { preserveDisplayTitle: true }));
     state.sprintSettingsSaving = false;
     state.sprintSettingsOpen = false;
     state.sprintPlan = null;
@@ -2009,7 +2010,9 @@ async function saveSprintSettings() {
       state.selectedSprintId = "all";
     }
     render();
-    showToast(`${data.sprints?.length || 0}件のスプリントを保存しました`);
+    showToast(
+      `${data.sprints?.length || 0}件のスプリントを保存し、${data.assigned_issue_count || 0}件のタスクを割り振りました`,
+    );
   } catch (error) {
     state.sprintSettingsSaving = false;
     state.sprintSettingsError = error.message;
